@@ -532,6 +532,69 @@ def test_voice_command_regression_matrix():
     assert r_efectivo["staged_action"]["target_item"]["delta"] == -20000.0
     assert r_efectivo["staged_action"]["target_item"]["note"] == "Almuerzo"
 
+def test_use_case_11_reranker_active_and_account_updates_transfers():
+    user_id = "test-case-11-user"
+    agent = FinanceAgent(user_id)
+
+    # 1. 'Actualiza banco caja social a $300000' -> propose_set_account_balance on Caja social
+    r1 = agent.process_voice_command("Actualiza banco caja social a $300000")
+    assert r1["type"] == "stage_action"
+    staged1 = r1["staged_action"]
+    assert staged1["tool_name"] == "propose_set_account_balance"
+    assert staged1["target_item"]["name"] == "Caja social"
+    assert staged1["target_item"]["after_value"] == 300000.0
+    assert "SET_BALANCE" in r1["prompt_enhancement"]["intent_hints"]
+    assert r1["rerank_score"] >= 0.80
+
+    # 2. 'Modifica mi bolsillo a $150.000' -> propose_set_account_balance on Bolsillo
+    r2 = agent.process_voice_command("Modifica mi bolsillo a $150.000")
+    assert r2["type"] == "stage_action"
+    staged2 = r2["staged_action"]
+    assert staged2["tool_name"] == "propose_set_account_balance"
+    assert staged2["target_item"]["name"] == "Bolsillo"
+    assert staged2["target_item"]["after_value"] == 150000.0
+
+    # 3. 'Pon Nequi en 250000' -> propose_set_account_balance on Nequi
+    r3 = agent.process_voice_command("Pon Nequi en 250000")
+    assert r3["type"] == "stage_action"
+    staged3 = r3["staged_action"]
+    assert staged3["tool_name"] == "propose_set_account_balance"
+    assert staged3["target_item"]["name"] == "Nequi"
+    assert staged3["target_item"]["after_value"] == 250000.0
+
+    # 4. 'Mueve desde caja social 100000 a bolsillo' -> propose_transfer_between_accounts
+    r4 = agent.process_voice_command("Mueve desde caja social 100000 a bolsillo")
+    assert r4["type"] == "stage_action"
+    staged4 = r4["staged_action"]
+    assert staged4["tool_name"] == "propose_transfer_between_accounts"
+    assert staged4["target_item"]["name"] == "Caja social"
+    assert staged4["target_item"]["delta"] == -100000.0
+    assert staged4["target_item"]["secondary_item"]["name"] == "Bolsillo"
+    assert staged4["target_item"]["secondary_item"]["delta"] == 100000.0
+    assert "TRANSFER" in r4["prompt_enhancement"]["intent_hints"]
+    assert r4["rerank_score"] >= 0.85
+
+    # 5. 'Mueve 100000 a bolsillo desde caja social' (destination first) -> propose_transfer_between_accounts
+    r5 = agent.process_voice_command("Mueve 100000 a bolsillo desde caja social")
+    assert r5["type"] == "stage_action"
+    staged5 = r5["staged_action"]
+    assert staged5["tool_name"] == "propose_transfer_between_accounts"
+    assert staged5["target_item"]["name"] == "Caja social"
+    assert staged5["target_item"]["delta"] == -100000.0
+    assert staged5["target_item"]["secondary_item"]["name"] == "Bolsillo"
+    assert staged5["target_item"]["secondary_item"]["delta"] == 100000.0
+
+    # 6. 'Transfiere de Nequi $50.000 a Daviplata' -> propose_transfer_between_accounts
+    r6 = agent.process_voice_command("Transfiere de Nequi $50.000 a Daviplata")
+    assert r6["type"] == "stage_action"
+    staged6 = r6["staged_action"]
+    assert staged6["tool_name"] == "propose_transfer_between_accounts"
+    assert staged6["target_item"]["name"] == "Nequi"
+    assert staged6["target_item"]["delta"] == -50000.0
+    assert staged6["target_item"]["secondary_item"]["name"] == "Daviplata"
+    assert staged6["target_item"]["secondary_item"]["delta"] == 50000.0
+
+
 
 
 

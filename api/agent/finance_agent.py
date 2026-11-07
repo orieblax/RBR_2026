@@ -117,6 +117,9 @@ EXPENSE_ALIASES = {
 
 def _extract_amount(text: str, mask_entity: Optional[str] = None) -> Optional[float]:
     clean = _strip_accents(text).lower()
+    # Strip currency symbols and names
+    clean = re.sub(r"[\$]", " ", clean)
+    clean = re.sub(r"\b(?:cop|pesos(?:\s+colombianos)?)\b", " ", clean)
 
     # 1. Mask out matched entity to avoid extracting due days (like "20" from "Camila 20" or "15" from "Gas 15")
     if mask_entity:
@@ -219,17 +222,41 @@ def _identify_expense(clean_text: str, expenses: List[Dict[str, Any]]) -> Option
 
 def _identify_transfer_accounts(text: str) -> Optional[Tuple[str, str]]:
     clean = _strip_accents(text).lower()
-    # Pattern: de/desde <acc1> ... a/para/hacia <acc2>
     acc_keys = "|".join(sorted(LIQUID_ACCOUNTS_MAP.keys(), key=len, reverse=True))
-    m = re.search(
-        rf"\b(?:de|desde)\s+(?:mi\s+)?({acc_keys})\b.*?\b(?:a|para|hacia|en)\s+(?:mi\s+)?({acc_keys})\b",
+
+    # Pattern A: de/desde <acc1> ... a/para/hacia/en <acc2>
+    m1 = re.search(
+        rf"\b(?:de|desde)\s+(?:mi\s+|la\s+)?(?:cuenta\s+)?({acc_keys})\b.*?\b(?:a|para|hacia|en)\s+(?:mi\s+|la\s+)?(?:cuenta\s+)?({acc_keys})\b",
         clean
     )
-    if m:
-        from_acc = LIQUID_ACCOUNTS_MAP[m.group(1)]
-        to_acc = LIQUID_ACCOUNTS_MAP[m.group(2)]
+    if m1:
+        from_acc = LIQUID_ACCOUNTS_MAP[m1.group(1)]
+        to_acc = LIQUID_ACCOUNTS_MAP[m1.group(2)]
         if from_acc != to_acc:
             return (from_acc, to_acc)
+
+    # Pattern B: a/para/hacia/en <acc2> ... de/desde <acc1> (destination first)
+    m2 = re.search(
+        rf"\b(?:a|para|hacia|en)\s+(?:mi\s+|la\s+)?(?:cuenta\s+)?({acc_keys})\b.*?\b(?:de|desde)\s+(?:mi\s+|la\s+)?(?:cuenta\s+)?({acc_keys})\b",
+        clean
+    )
+    if m2:
+        to_acc = LIQUID_ACCOUNTS_MAP[m2.group(1)]
+        from_acc = LIQUID_ACCOUNTS_MAP[m2.group(2)]
+        if from_acc != to_acc:
+            return (from_acc, to_acc)
+
+    # Fallback: scan for any two distinct liquid accounts
+    found: List[Tuple[int, str]] = []
+    for k, v in sorted(LIQUID_ACCOUNTS_MAP.items(), key=lambda x: -len(x[0])):
+        for match in re.finditer(rf"\b{re.escape(k)}\b", clean):
+            start = match.start()
+            if not any(abs(start - f[0]) < len(k) for f in found):
+                found.append((start, v))
+    found.sort(key=lambda x: x[0])
+    if len(found) >= 2 and found[0][1] != found[1][1]:
+        return (found[0][1], found[1][1])
+
     return None
 
 def _extract_reason(text: str, account_name: Optional[str] = None) -> str:
@@ -644,9 +671,10 @@ class FinanceAgent:
         }
 
     def process_voice_command(self, text: str) -> Dict[str, Any]:
-        # Step 1: User Prompt Enhancement (Phonetic ASR + Colloquial Slang + Verb Canonicalization)
+        # Step 1: User Prompt Enhancement (Phonetic ASR + Currency Cleaning + Slang + Morphological Intent Hints)
         enhanced = PromptEnhancer.enhance(text)
         clean = enhanced["canonical_text"]
+        intent_hints = enhanced.get("intent_hints", [])
 
         # 0. Immediate voice confirmation / cancellation words
         if clean in ("confirmar", "si confirmar", "confirmo", "dale", "si", "aprobar"):
@@ -661,17 +689,7 @@ class FinanceAgent:
                     res = self.cancel_action(act_id)
                     return {"type": "cancelled", "reply": "Acción descartada", "needs_refresh": False, "prompt_enhancement": enhanced}
 
-        # 1. Undo Last Adjustment Intent
-        is_undo_intent = any(
-            kw in clean
-            for kw in ("deshacer", "borrar ultimo", "borrar el ultimo", "eliminar ultimo", "eliminar el ultimo", "revertir ultimo")
-        )
-        if is_undo_intent:
-            target_acc = _identify_liquid_account(clean)
-            staged = self.propose_undo_last_adjustment(target_acc)
-            return self._finalize_staged_response(staged, enhanced)
-
-        # 2. Smart Read Queries: Pending Receivables, Pending Bills, Goals Progress
+        # 1. Smart Read Queries (checked first if explicit query pattern)
         is_pending_recs_query = any(
             kw in clean
             for kw in ("quien falta por pagar", "arriendos pendientes", "cuentas por cobrar", "quien me debe", "falta por cobrar", "pendientes por cobrar")
@@ -735,41 +753,103 @@ class FinanceAgent:
                 "prompt_enhancement": enhanced
             }
 
-        # 3. Allocate to Financial Goal Intent
+        is_investment_query = any(w in clean for w in ("invertir", "capacidad", "excedente", "incl pend")) and not any(v in clean for v in ("gaste", "pague", "transferi", "abonar", "actualiza"))
+        if is_investment_query:
+            cap = self.get_investment_capacity("month")
+            val = cap["capacidad_invertible"]
+            return {
+                "type": "read",
+                "reply": f"Tu capacidad disponible para invertir este mes (Incl Pend) es de ${val:,.0f} COP. (Fórmula: Restante + Pend - Total Gastos).",
+                "data": cap,
+                "prompt_enhancement": enhanced
+            }
+
+        is_account_balance_query = any(clean.startswith(p) for p in ("cuanto tengo", "cuanto hay", "saldo de", "estado de cuenta", "ver saldo")) or (
+            any(w in clean for w in ("cuanto", "saldo", "estado")) and not any(v in clean for v in ("actualiz", "modific", "cambi", "fij", "ajust", "pon", "deja", "gaste", "pague", "transferi", "mueve", "abono"))
+        )
+        if is_account_balance_query:
+            summary = self.query_service.get_dashboard_summary()
+            for acc in summary["liquid_accounts"]:
+                if acc["name"].lower() in clean:
+                    return {
+                        "type": "read",
+                        "reply": f"El saldo actual en {acc['name']} es de ${acc['calculated_total']:,.0f} COP con {len(acc.get('adjustments', []))} movimientos inline.",
+                        "data": acc,
+                        "prompt_enhancement": enhanced
+                    }
+
+        # 2. Action Candidate Generation & Active Multi-Signal Re-Ranking
+        transfer_pair = _identify_transfer_accounts(clean)
+        matched_rec = _identify_receivable(clean)
+        expenses = self.query_service.repo.get_recurring_expenses()
+        matched_expense_name = _identify_expense(clean, expenses)
+        identified_acc = _identify_account(clean)
+        source_liq_acc = _identify_liquid_account(clean)
+        amount = _extract_amount(clean)
+
+        candidates: List[Dict[str, Any]] = []
+
+        # Candidate A: Transfer between accounts
+        if transfer_pair and amount is not None:
+            has_transfer_verb = ("TRANSFER" in intent_hints) or any(
+                re.search(rf"\b{v}", clean) for v in ("transfer", "transfier", "mov", "muev", "pas", "sac", "retir", "envi", "mand", "traslad")
+            )
+            candidates.append({
+                "tool_name": "propose_transfer_between_accounts",
+                "fn": lambda: self.propose_transfer_between_accounts(transfer_pair[0], transfer_pair[1], amount),
+                "slot_completeness": 1.0,
+                "specificity_bonus": 0.98 if has_transfer_verb else 0.6,
+                "state_prior": 0.95 if has_transfer_verb else 0.7,
+            })
+
+        # Candidate B: Set account balance
+        if identified_acc and amount is not None:
+            has_set_verb = ("SET_BALANCE" in intent_hints) or any(
+                re.search(rf"\b{v}", clean) for v in ("actualiz", "modific", "cambi", "fij", "establec", "ajust", "pon", "deja", "quedo", "queda")
+            )
+            has_movement_verb = any(
+                re.search(rf"\b{v}", clean) for v in ("gaste", "gasto", "compre", "pague", "retire", "saque", "abono", "ingreso", "recibi", "agregar", "muev", "transfer")
+            )
+            is_balance_set = has_set_verb and not has_movement_verb
+            candidates.append({
+                "tool_name": "propose_set_account_balance",
+                "fn": lambda: self.propose_set_account_balance(identified_acc, amount, note="Actualización directa de saldo"),
+                "slot_completeness": 1.0 if is_balance_set else 0.5,
+                "specificity_bonus": 0.99 if is_balance_set else 0.3,
+                "state_prior": 0.95 if is_balance_set else 0.5,
+            })
+
+        # Candidate C: Allocate to financial goal
         if matched_goal:
             goal_amount = _extract_amount(clean, mask_entity=matched_goal)
-            has_goal_verb = any(
-                v in clean
-                for v in ("abonar", "abono", "abone", "asignar", "meter", "meti", "aportar", "agregar", "destinar", "ahorrar", "ahorre", "guarde", "separe", "meta")
-            )
-            if goal_amount is not None and has_goal_verb:
-                staged = self.propose_allocate_goal(matched_goal, goal_amount)
-                return self._finalize_staged_response(staged, enhanced)
+            if goal_amount is not None:
+                has_goal_verb = ("ALLOCATE_GOAL" in intent_hints) or any(
+                    v in clean
+                    for v in ("abonar", "abono", "abone", "asignar", "meter", "meti", "aportar", "agregar", "destinar", "ahorrar", "ahorre", "guarde", "separe", "meta")
+                )
+                candidates.append({
+                    "tool_name": "propose_allocate_goal",
+                    "fn": lambda: self.propose_allocate_goal(matched_goal, goal_amount),
+                    "slot_completeness": 1.0 if has_goal_verb else 0.7,
+                    "specificity_bonus": 0.98 if has_goal_verb else 0.5,
+                    "state_prior": 0.95,
+                })
 
-        # 4. Transfer Between Liquid Accounts Intent
-        transfer_pair = _identify_transfer_accounts(clean)
-        has_transfer_verb = any(
-            v in clean
-            for v in ("transferi", "transferir", "transferencia", "pase", "pasar", "movi", "mover", "saque", "retire", "enviar", "envie")
-        )
-        if transfer_pair and has_transfer_verb:
-            from_acc, to_acc = transfer_pair
-            amount = _extract_amount(clean)
-            if amount is not None:
-                staged = self.propose_transfer_between_accounts(from_acc, to_acc, amount)
-                return self._finalize_staged_response(staged, enhanced)
-
-        # 5. Collect Receivable / Rent Intent
-        matched_rec = _identify_receivable(clean)
-        is_collect_intent = any(
+        # Candidate D: Collect receivable / rent
+        is_collect_intent = ("COLLECT_RECEIVABLE" in intent_hints) or any(
             kw in clean
             for kw in ("arriendo", "marcar cobrado", "cobrado", "cobre", "ya pago", "me pago", "recibi el pago", "pago de")
         )
         if is_collect_intent:
             dest_acc = _identify_liquid_account(clean)
             if matched_rec:
-                staged = self.propose_collect_receivable(matched_rec, is_collected=True, dest_account=dest_acc)
-                return self._finalize_staged_response(staged, enhanced)
+                candidates.append({
+                    "tool_name": "propose_collect_receivable",
+                    "fn": lambda: self.propose_collect_receivable(matched_rec, is_collected=True, dest_account=dest_acc),
+                    "slot_completeness": 1.0,
+                    "specificity_bonus": 0.98,
+                    "state_prior": 0.95,
+                })
             else:
                 summary = self.query_service.get_dashboard_summary()
                 rec_candidates = []
@@ -790,139 +870,148 @@ class FinanceAgent:
                         })
                 if rec_candidates:
                     reranked_recs = ReRanker.rerank_disambiguation_options(clean, rec_candidates)
-                    staged = self.propose_collect_receivable(
-                        reranked_recs[0]["item_name"],
-                        is_collected=True,
-                        dest_account=dest_acc,
-                        candidates=reranked_recs
-                    )
-                    return self._finalize_staged_response(
-                        staged,
-                        enhanced,
-                        custom_reply="¿Cuál cuenta por cobrar o arriendo recibiste? Selecciona una opción:"
-                    )
+                    candidates.append({
+                        "tool_name": "propose_collect_receivable",
+                        "fn": lambda: self.propose_collect_receivable(
+                            reranked_recs[0]["item_name"],
+                            is_collected=True,
+                            dest_account=dest_acc,
+                            candidates=reranked_recs
+                        ),
+                        "custom_reply": "¿Cuál cuenta por cobrar o arriendo recibiste? Selecciona una opción:",
+                        "slot_completeness": 0.8,
+                        "specificity_bonus": 0.88,
+                        "state_prior": 0.88,
+                    })
 
-        # 6. Mark Expense Pending (*1) or Paid (*0) / Pay Expense From Account
-        expenses = self.query_service.repo.get_recurring_expenses()
-        matched_expense_name = _identify_expense(clean, expenses)
+        # Candidate E: Pay expense from account / toggle pending
+        is_revert = any(kw in clean for kw in ("marcar pendiente", "como pendiente", "reactivar factura", "reactivar recibo"))
+        if is_revert and matched_expense_name:
+            candidates.append({
+                "tool_name": "propose_toggle_pending_status",
+                "fn": lambda: self.propose_toggle_pending_status(matched_expense_name, is_paid=False),
+                "slot_completeness": 1.0,
+                "specificity_bonus": 0.99,
+                "state_prior": 0.95,
+            })
 
-        is_revert_pending_intent = any(kw in clean for kw in ("marcar pendiente", "como pendiente", "reactivar factura", "reactivar recibo"))
-        if is_revert_pending_intent and matched_expense_name:
-            staged = self.propose_toggle_pending_status(matched_expense_name, is_paid=False)
-            return self._finalize_staged_response(staged, enhanced)
-
-        is_paid_intent = any(kw in clean for kw in ("marcar pagado", "como pagado", "pagado", "pague", "pago", "cancela factura"))
+        is_paid_intent = ("PAY_EXPENSE" in intent_hints) or any(
+            kw in clean for kw in ("marcar pagado", "como pagado", "pagado", "pague", "pago", "cancela factura")
+        )
         is_explicit_invoice_word = any(
             w in clean for w in ("factura", "recibo", "servicio", "servicios", "marcar pagado", "como pagado")
         )
-        explicit_custom_amount = _extract_amount(clean, mask_entity=matched_expense_name) if matched_expense_name else _extract_amount(clean)
-        has_ledger_expense_noun = any(w in clean for w in ("gaste", "gasto", "agregar gasto", "compre"))
+        explicit_custom_amount = _extract_amount(clean, mask_entity=matched_expense_name) if matched_expense_name else amount
+        has_ledger_expense_noun = ("LEDGER_EXPENSE" in intent_hints) or any(w in clean for w in ("gaste", "gasto", "agregar gasto", "compre"))
 
-        # Only enter recurring invoice payment if:
-        # (a) An explicit invoice word is present ("factura", "recibo", "servicio", "marcar pagado"), OR
-        # (b) A recurring expense name is matched AND the user is not specifying a custom ad-hoc ledger amount
         if is_paid_intent and not has_ledger_expense_noun and (
             is_explicit_invoice_word or (matched_expense_name and explicit_custom_amount is None)
         ):
-            source_liq_acc = _identify_liquid_account(clean)
-
             if matched_expense_name:
                 if source_liq_acc:
-                    staged = self.propose_pay_expense_from_account(matched_expense_name, source_liq_acc)
+                    candidates.append({
+                        "tool_name": "propose_pay_expense_from_account",
+                        "fn": lambda: self.propose_pay_expense_from_account(matched_expense_name, source_liq_acc),
+                        "slot_completeness": 1.0,
+                        "specificity_bonus": 0.98,
+                        "state_prior": 0.95,
+                    })
                 else:
-                    staged = self.propose_toggle_pending_status(matched_expense_name, is_paid=True)
-                return self._finalize_staged_response(staged, enhanced)
-
-            # Ambiguous match or generic invoice intent -> Re-Rank pending candidates
-            pending_candidates = []
-            for exp in expenses:
-                if exp.get("is_pending", True):
-                    preview = self.command_service.preview_mutation("toggle_pending_status", {
-                        "category": "recurring_expenses",
-                        "item_name": exp["name"],
-                        "is_paid": True
+                    candidates.append({
+                        "tool_name": "propose_toggle_pending_status",
+                        "fn": lambda: self.propose_toggle_pending_status(matched_expense_name, is_paid=True),
+                        "slot_completeness": 1.0,
+                        "specificity_bonus": 0.95,
+                        "state_prior": 0.95,
                     })
-                    pending_candidates.append({
-                        "item_name": exp["name"],
-                        "amount": float(exp.get("recurrent_base", 0.0)),
-                        "preview_summary": f"Marcar {exp['name']} como pagado",
-                        "delta_incl_pend": preview["impact_delta"]["delta_incl_pend"],
-                        "delta_restante": preview["impact_delta"]["delta_restante"],
-                        "target_item": preview.get("target_item")
+            elif is_explicit_invoice_word:
+                pending_candidates = []
+                for exp in expenses:
+                    if exp.get("is_pending", True):
+                        preview = self.command_service.preview_mutation("toggle_pending_status", {
+                            "category": "recurring_expenses",
+                            "item_name": exp["name"],
+                            "is_paid": True
+                        })
+                        pending_candidates.append({
+                            "item_name": exp["name"],
+                            "amount": float(exp.get("recurrent_base", 0.0)),
+                            "preview_summary": f"Marcar {exp['name']} como pagado",
+                            "delta_incl_pend": preview["impact_delta"]["delta_incl_pend"],
+                            "delta_restante": preview["impact_delta"]["delta_restante"],
+                            "target_item": preview.get("target_item")
+                        })
+                if pending_candidates:
+                    reranked_exps = ReRanker.rerank_disambiguation_options(clean, pending_candidates)
+                    candidates.append({
+                        "tool_name": "propose_toggle_pending_status",
+                        "fn": lambda: self.propose_toggle_pending_status(
+                            reranked_exps[0]["item_name"],
+                            is_paid=True,
+                            candidates=reranked_exps
+                        ),
+                        "custom_reply": "¿Cuál factura deseas marcar como pagada? Selecciona una de las opciones pendientes:",
+                        "slot_completeness": 0.8,
+                        "specificity_bonus": 0.85,
+                        "state_prior": 0.85,
                     })
 
-            if pending_candidates:
-                reranked_exps = ReRanker.rerank_disambiguation_options(clean, pending_candidates)
-                top_candidate = reranked_exps[0]
-                staged = self.propose_toggle_pending_status(
-                    top_candidate["item_name"],
-                    is_paid=True,
-                    candidates=reranked_exps
-                )
-                return self._finalize_staged_response(
-                    staged,
-                    enhanced,
-                    custom_reply="¿Cuál factura deseas marcar como pagada? Selecciona una de las opciones pendientes:"
-                )
-
-        # 7. Direct Account Balance Modification
-        has_set_verb = any(v in clean for v in ("modificar", "cambiar", "fijar", "poner", "dejar", "actualizar", "establecer", "ajustar"))
-        has_movement_verb = any(v in clean for v in ("gaste", "gasto", "compre", "pague", "retire", "saque", "abono", "ingreso", "recibi", "agregar"))
-        identified_acc = _identify_account(clean)
-
-        if has_set_verb and not has_movement_verb and identified_acc:
-            amount = _extract_amount(clean, mask_entity=identified_acc)
-            if amount is not None:
-                staged = self.propose_set_account_balance(identified_acc, amount, note="Actualización directa de saldo")
-                return self._finalize_staged_response(staged, enhanced)
-
-        # 8. Add Ledger Adjustment / Natural Expense or Income
-        identified_acc = identified_acc or "Daviplata"
-        amount = _extract_amount(clean, mask_entity=identified_acc)
-
-        is_expense_phrase = any(
-            v in clean
-            for v in ("gaste", "gasto", "compre", "pague", "pago", "pagar", "retire", "saque", "descuento", "descontaron", "cobraron", "costo", "salio", "salieron")
+        # Candidate F: Undo last adjustment
+        is_undo_intent = ("UNDO" in intent_hints) or any(
+            kw in clean
+            for kw in ("deshacer", "borrar ultimo", "borrar el ultimo", "eliminar ultimo", "eliminar el ultimo", "revertir ultimo")
         )
-        is_income_phrase = any(
-            v in clean
-            for v in ("abono", "abonar", "abone", "ingreso", "ingrese", "recibi", "recibo", "meti", "meter", "deposite", "deposito", "consigne", "consigno", "consignaron")
-        )
-        is_general_add = any(v in clean for v in ("agregar", "anotar", "ajuste", "movimiento"))
+        if is_undo_intent:
+            target_acc = _identify_liquid_account(clean)
+            candidates.append({
+                "tool_name": "propose_undo_last_adjustment",
+                "fn": lambda: self.propose_undo_last_adjustment(target_acc),
+                "slot_completeness": 1.0 if target_acc else 0.8,
+                "specificity_bonus": 0.99,
+                "state_prior": 0.95,
+            })
 
-        if amount is not None and (is_expense_phrase or is_income_phrase or is_general_add):
-            if is_expense_phrase or "gasto" in clean:
-                amount_delta = -abs(amount)
-            else:
-                amount_delta = abs(amount)
+        # Candidate G: Add ledger adjustment
+        if identified_acc or (not matched_goal and not matched_expense_name):
+            target_ledger_acc = identified_acc or "Daviplata"
+            ledger_amount = _extract_amount(clean, mask_entity=target_ledger_acc)
+            if ledger_amount is not None:
+                is_expense_phrase = ("LEDGER_EXPENSE" in intent_hints) or any(
+                    v in clean
+                    for v in ("gaste", "gasto", "compre", "pague", "pago", "pagar", "retire", "saque", "descuento", "descontaron", "cobraron", "costo", "salio", "salieron")
+                )
+                is_income_phrase = ("LEDGER_INCOME" in intent_hints) or any(
+                    v in clean
+                    for v in ("abono", "abonar", "abone", "ingreso", "ingrese", "recibi", "recibo", "meti", "meter", "deposite", "deposito", "consigne", "consigno", "consignaron")
+                )
+                is_general_add = any(v in clean for v in ("agregar", "anotar", "ajuste", "movimiento"))
 
-            parent_type = "receivable" if identified_acc in RECEIVABLES_MAP.values() else "liquid_account"
-            reason = _extract_reason(clean, account_name=identified_acc)
-            staged = self.propose_ledger_adjustment(identified_acc, amount_delta, reason, parent_type=parent_type)
-            return self._finalize_staged_response(staged, enhanced)
+                if is_expense_phrase or is_income_phrase or is_general_add:
+                    delta = -abs(ledger_amount) if (is_expense_phrase or "gasto" in clean) else abs(ledger_amount)
+                    parent_type = "receivable" if target_ledger_acc in RECEIVABLES_MAP.values() else "liquid_account"
+                    reason = _extract_reason(clean, account_name=target_ledger_acc)
+                    candidates.append({
+                        "tool_name": "propose_ledger_adjustment",
+                        "fn": lambda: self.propose_ledger_adjustment(target_ledger_acc, delta, reason, parent_type=parent_type),
+                        "slot_completeness": 1.0 if (identified_acc and (is_expense_phrase or is_income_phrase)) else 0.75,
+                        "specificity_bonus": 0.88 if (is_expense_phrase or is_income_phrase) else 0.5,
+                        "state_prior": 0.85,
+                    })
 
-        # 9. Read Investment Capacity
-        if any(w in clean for w in ("invertir", "capacidad", "excedente", "incl pend")):
-            cap = self.get_investment_capacity("month")
-            val = cap["capacidad_invertible"]
+        # Active Re-Ranking Evaluation
+        if candidates:
+            ranked_candidates = ReRanker.rerank_intent_candidates(clean, candidates, intent_hints=intent_hints)
+            winner = ranked_candidates[0]
+            staged = winner["fn"]()
+            staged["rerank_score"] = winner["rerank_score"]
+            staged["prompt_enhancement"] = enhanced
             return {
-                "type": "read",
-                "reply": f"Tu capacidad disponible para invertir este mes (Incl Pend) es de ${val:,.0f} COP. (Fórmula: Restante + Pend - Total Gastos).",
-                "data": cap,
-                "prompt_enhancement": enhanced
+                "type": "stage_action",
+                "staged_action": staged,
+                "prompt_enhancement": enhanced,
+                "rerank_score": winner["rerank_score"],
+                "reply": winner.get("custom_reply") or f"Propuesta: {staged['preview_summary']}. ¿Confirmas el cambio?"
             }
-
-        # 10. Read Account details / balance
-        if any(w in clean for w in ("cuanto", "saldo", "estado")):
-            summary = self.query_service.get_dashboard_summary()
-            for acc in summary["liquid_accounts"]:
-                if acc["name"].lower() in clean:
-                    return {
-                        "type": "read",
-                        "reply": f"El saldo actual en {acc['name']} es de ${acc['calculated_total']:,.0f} COP con {len(acc.get('adjustments', []))} movimientos inline.",
-                        "data": acc,
-                        "prompt_enhancement": enhanced
-                    }
 
         # Default fallback: general summary
         kpis = self.query_service.get_dashboard_summary()["kpis"]

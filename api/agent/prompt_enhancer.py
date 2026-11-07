@@ -14,12 +14,16 @@ def strip_accents(text: str) -> str:
 
 class PromptEnhancer:
     """
-    Non-destructive pre-processing and canonicalization layer for raw user voice/text commands.
-    Strictly preserves sentence structure, prepositions, and verbs while normalizing:
-    1. Phonetic ASR errors for Colombian Spanish financial entities ('david plata' -> 'daviplata', 'neki' -> 'nequi').
-    2. Colloquial currency multipliers ('50 lucas' -> '50 mil', 'un palo' -> '1000000').
-    3. Safe entity synonyms ('billetera' -> 'bolsillo', 'recibo de la luz' -> 'recibo de energia').
-    4. Context-aware colloquial verb expressions (only when unambiguous).
+    Non-destructive pre-processing, canonicalization, and intent hint extraction layer
+    for raw user voice/text commands.
+    Strictly preserves sentence structure and semantics while:
+    1. Cleaning currency symbols and units ('$300000' -> '300000', 'COP 50.000' -> '50000').
+    2. Normalizing bank and account prefixes ('banco caja social' -> 'caja social').
+    3. Normalizing phonetic ASR errors for Colombian financial entities ('david plata' -> 'daviplata', 'neki' -> 'nequi').
+    4. Normalizing Colombian colloquial currency multipliers ('50 lucas' -> '50 mil', 'un palo' -> '1000000').
+    5. Normalizing safe entity synonyms ('billetera' -> 'bolsillo', 'recibo de la luz' -> 'recibo de energia').
+    6. Extracting high-level morphological intent hints (SET_BALANCE, TRANSFER, EXPENSE, INCOME, PAY_BILL, COLLECT, GOAL, UNDO)
+       to empower downstream re-ranking.
     """
 
     # 1. Safe Phonetic ASR & Synonym Replacements for Entities (ordered longest-first)
@@ -28,6 +32,7 @@ class PromptEnhancer:
         (r"\bdavi\s+plata\b", "daviplata"),
         (r"\bdabi\s*plata\b", "daviplata"),
         (r"\bdaviplata\b", "daviplata"),
+        (r"\bel\s+banco\s+caja\s+social\b", "caja social"),
         (r"\bbanco\s+caja\s+social\b", "caja social"),
         (r"\bcaja\s+social\b", "caja social"),
         (r"\bcajasocial\b", "caja social"),
@@ -92,6 +97,45 @@ class PromptEnhancer:
     TENANT_NAMES = ("camila", "ana", "marisol", "angelica", "odeth")
 
     @classmethod
+    def extract_intent_hints(cls, clean_text: str) -> List[str]:
+        hints: List[str] = []
+        t = clean_text
+
+        # SET_BALANCE hint: actualiza, modificar, cambiar, fijar, poner, pon, deja, ajustar, saldo en, etc.
+        if re.search(r"\b(?:actualiz\w*|modific\w*|cambi\w*|fij\w*|establec\w*|ajust\w*|pon\w*|puse|deja\w*|quedo\s+en|queda\s+en|saldo\s+en)\b", t):
+            hints.append("SET_BALANCE")
+
+        # TRANSFER hint: mover, mueve, transferir, transfiere, pasar, pasa, sacar, saca, enviar, etc.
+        if re.search(r"\b(?:muev\w*|mov\w*|transfier\w*|transfer\w*|pas\w*|sac\w*|retir\w*|envi\w*|mand\w*|traslad\w*)\b", t):
+            hints.append("TRANSFER")
+
+        # GOAL hint: meta, metas, or any goal name/alias or saving verbs
+        if re.search(r"\b(?:meta|metas|ahorr\w*|abon\w*|aport\w*|destin\w*|separ\w*|guard\w*|maestria|posgrado|visa|english|ingles|brisas|matrimonio|boda|ortodoncia|odontologia)\b", t):
+            hints.append("ALLOCATE_GOAL")
+
+        # COLLECT hint: arriendo, cobrado, cobre, ya pago, me pago, consigno, inquilino
+        if re.search(r"\b(?:arriendo|cobrad\w*|cobr\w*|ya\s+pago|me\s+pago)\b", t) or (
+            any(re.search(rf"\b{name}\b", t) for name in cls.TENANT_NAMES) and re.search(r"\b(?:pago|consign\w*|transfir\w*|deposito)\b", t)
+        ):
+            hints.append("COLLECT_RECEIVABLE")
+
+        # PAY_BILL hint: factura, recibo, servicio, marcar pagado, como pagado
+        if re.search(r"\b(?:factura\w*|recibo\w*|servicio\w*|marcar\s+pagado|como\s+pagado)\b", t):
+            hints.append("PAY_EXPENSE")
+
+        # UNDO hint: deshacer, borrar ultimo, eliminar ultimo, revertir
+        if re.search(r"\b(?:deshac\w*|deshaz|deshice|borr\w*\s+el\s+ultimo|borr\w*\s+ultimo|elimin\w*\s+ultimo|revert\w*|reviert\w*)\b", t):
+            hints.append("UNDO")
+
+        # LEDGER EXPENSE / INCOME hints
+        if re.search(r"\b(?:gast\w*|compr\w*|descont\w*|descuent\w*|cobraron|salieron|costo)\b", t):
+            hints.append("LEDGER_EXPENSE")
+        if re.search(r"\b(?:ingres\w*|deposit\w*|recib\w*|sum\w*|abono\w*|met[ií]|mete|meter)\b", t):
+            hints.append("LEDGER_INCOME")
+
+        return hints
+
+    @classmethod
     def enhance(cls, raw_text: str) -> Dict[str, Any]:
         """
         Transforms user variants into a normalized canonical representation
@@ -100,6 +144,10 @@ class PromptEnhancer:
         original = (raw_text or "").strip()
         clean = strip_accents(original).lower()
         clean = re.sub(r"[¿?¡!;:]+", " ", clean)
+
+        # 0. Clean currency symbols and prefixes ($300000 -> 300000, COP 50.000 -> 50.000)
+        clean = re.sub(r"\$\s*", "", clean)
+        clean = re.sub(r"\b(?:cop|pesos(?:\s+colombianos)?)\b", "", clean)
         clean = re.sub(r"\s+", " ", clean).strip()
 
         applied_rules: List[str] = []
@@ -133,12 +181,14 @@ class PromptEnhancer:
                 clean = new_clean
 
         clean = re.sub(r"\s+", " ", clean).strip()
+        hints = cls.extract_intent_hints(clean)
 
         return {
             "raw_text": original,
             "canonical_text": clean,
             "was_enhanced": len(applied_rules) > 0,
             "applied_rules": applied_rules,
+            "intent_hints": hints,
         }
 
     @classmethod
@@ -154,6 +204,8 @@ class PromptEnhancer:
         ]
         if enhanced["applied_rules"]:
             lines.append(f"Normalizaciones aplicadas: {', '.join(enhanced['applied_rules'])}")
+        if enhanced.get("intent_hints"):
+            lines.append(f"Pistas de intención detectadas: {', '.join(enhanced['intent_hints'])}")
         if financial_context:
             kpis = financial_context.get("kpis", {})
             lines.append(

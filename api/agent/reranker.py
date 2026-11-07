@@ -49,12 +49,45 @@ class ReRanker:
     """
     Multi-Signal Candidate Re-Ranker for RBR Finance Manager.
     Scores and re-orders:
-    1. Intent / Tool candidates across user phrasing variants.
+    1. Intent / Tool candidates across user phrasing variants and morphological forms.
     2. Domain entities (expenses, receivables, accounts, goals) with strict word boundaries + state priors.
-    3. Financial history search results.
+    3. Disambiguation modal options and financial history search results.
     """
 
     TOOL_EXEMPLARS: Dict[str, List[str]] = {
+        "propose_set_account_balance": [
+            "actualiza banco caja social a",
+            "actualizar saldo de caja social en",
+            "actualiza mi cuenta en",
+            "modificar el saldo de bolsillo a",
+            "modifica mi bolsillo a",
+            "fijar daviplata en",
+            "fija daviplata en",
+            "cambiar el saldo de nequi a",
+            "cambia nequi a",
+            "pon nequi en",
+            "poner bolsillo en",
+            "dejar bolsillo en",
+            "deja daviplata en",
+            "establecer saldo de cuenta en",
+            "ajustar saldo de caja social a",
+            "daviplata quedo en",
+        ],
+        "propose_transfer_between_accounts": [
+            "mueve desde caja social a bolsillo",
+            "mueve de caja social a bolsillo",
+            "mover dinero de caja social a bolsillo",
+            "transferi de caja social a nequi",
+            "transfiere de nequi a daviplata",
+            "transferir plata de una cuenta a otra",
+            "pase dinero de daviplata a mi bolsillo",
+            "pasa de daviplata a bolsillo",
+            "pasar plata entre cuentas",
+            "saque de caja social para mi bolsillo",
+            "saca de daviplata para bolsillo",
+            "mover plata desde nequi hacia daviplata",
+            "trasladar fondos de cuenta a cuenta",
+        ],
         "propose_undo_last_adjustment": [
             "borrar el ultimo movimiento de cuenta",
             "deshacer ultimo ajuste",
@@ -63,16 +96,12 @@ class ReRanker:
         ],
         "propose_allocate_goal": [
             "abonar a la meta de maestria",
+            "le meti a la maestria",
+            "meter plata a la maestria",
             "asignar dinero a la meta visa",
             "meter ahorro a casa brisas",
             "aportar a meta de ortodoncia",
             "destinar a meta english matrimonio",
-        ],
-        "propose_transfer_between_accounts": [
-            "transferi de caja social a nequi",
-            "pase dinero de daviplata a mi bolsillo",
-            "saque de caja social para mi bolsillo",
-            "mover plata desde nequi hacia daviplata",
         ],
         "propose_collect_receivable": [
             "ana ya pago el arriendo en caja social",
@@ -94,13 +123,6 @@ class ReRanker:
             "marcar pendiente gas",
             "pague una factura recibo servicio",
         ],
-        "propose_set_account_balance": [
-            "modificar el saldo de bolsillo a",
-            "fijar daviplata en",
-            "cambiar el saldo de nequi a",
-            "actualizar saldo de caja social en",
-            "dejar bolsillo en",
-        ],
         "propose_ledger_adjustment": [
             "gaste en transporte desde mi bolsillo",
             "agregar gasto en daviplata por mercado",
@@ -108,6 +130,17 @@ class ReRanker:
             "compre con nequi",
             "ingreso en caja social",
         ],
+    }
+
+    TOOL_INTENT_MAP: Dict[str, List[str]] = {
+        "propose_set_account_balance": ["SET_BALANCE"],
+        "propose_transfer_between_accounts": ["TRANSFER"],
+        "propose_undo_last_adjustment": ["UNDO"],
+        "propose_allocate_goal": ["ALLOCATE_GOAL"],
+        "propose_collect_receivable": ["COLLECT_RECEIVABLE"],
+        "propose_pay_expense_from_account": ["PAY_EXPENSE"],
+        "propose_toggle_pending_status": ["PAY_EXPENSE"],
+        "propose_ledger_adjustment": ["LEDGER_EXPENSE", "LEDGER_INCOME"],
     }
 
     @classmethod
@@ -133,23 +166,43 @@ class ReRanker:
     def rerank_intent_candidates(
         cls,
         canonical_text: str,
-        candidates: List[Dict[str, Any]]
+        candidates: List[Dict[str, Any]],
+        intent_hints: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
+        """
+        Ranks candidate tool calls using 5 weighted signals:
+        - w1 (0.30): Exemplar similarity across morphological variations
+        - w2 (0.25): Morphological intent hint alignment
+        - w3 (0.25): Slot / entity completeness
+        - w4 (0.10): Specificity bonus
+        - w5 (0.10): Domain state prior / entity confidence
+        """
         scored = []
+        hints_set = set(intent_hints or [])
+
         for cand in candidates:
             tool_name = cand.get("tool_name", "")
             s1_exemplar = cls.score_text_against_exemplars(canonical_text, tool_name)
-            s2_slots = float(cand.get("slot_completeness", 0.8))
-            s3_fuzzy = float(cand.get("entity_match_score", 0.85))
-            s4_prior = float(cand.get("state_prior", 0.8))
-            s5_specificity = float(cand.get("specificity_bonus", 0.5))
+
+            # Intent alignment
+            expected_hints = cls.TOOL_INTENT_MAP.get(tool_name, [])
+            if any(h in hints_set for h in expected_hints):
+                s2_intent = 1.0
+            elif hints_set:
+                s2_intent = 0.20
+            else:
+                s2_intent = 0.70
+
+            s3_slots = float(cand.get("slot_completeness", 0.8))
+            s4_specificity = float(cand.get("specificity_bonus", 0.5))
+            s5_prior = float(cand.get("state_prior", cand.get("entity_confidence", 0.8)))
 
             total_score = (
-                0.35 * s1_exemplar
-                + 0.25 * s2_slots
-                + 0.15 * s3_fuzzy
-                + 0.15 * s4_prior
-                + 0.10 * s5_specificity
+                0.30 * s1_exemplar
+                + 0.25 * s2_intent
+                + 0.25 * s3_slots
+                + 0.10 * s4_specificity
+                + 0.10 * s5_prior
             )
             cand_copy = {
                 **cand,
@@ -169,18 +222,9 @@ class ReRanker:
         prefer_pending: bool = True,
         threshold: float = 0.75
     ) -> List[Tuple[Dict[str, Any], float]]:
-        """
-        Ranks domain entities against the utterance without partial-word false positives.
-        Priority order:
-        1. Full item name exact token match (e.g. 'gas 15', 'servicio 30') -> 0.99
-        2. Specific base name exact token match (e.g. 'gas', 'energia', 'agua') -> 0.95
-        3. Per-item alias exact token match -> 0.92
-        4. Long-word (>=5 chars) phonetic/typo similarity (>=0.84) -> sim * 0.88
-        """
         clean = strip_accents(canonical_text).lower()
         words = [w for w in re.findall(r"[a-zñ0-9]+", clean) if len(w) >= 5 and w not in STOP_TOKENS]
 
-        # Build reverse alias lookup per official item name (lowercase)
         item_aliases: Dict[str, List[str]] = {}
         if aliases_map:
             for alias, official in aliases_map.items():
