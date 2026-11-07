@@ -403,4 +403,136 @@ def test_use_case_10_prompt_enhancer_and_reranker_variants():
     assert ranked[0]["rerank_score"] > ranked[1]["rerank_score"]
 
 
+def test_ai_model_persistence_across_restarts(tmp_path):
+    from api.repositories.settings_repo import SettingsRepository
+    from api.index import (
+        update_default_ai_model,
+        UpdateDefaultModelRequest,
+        get_admin_diagnostics,
+        save_ai_credentials,
+        SaveAICredentialRequest,
+        get_ai_credentials,
+    )
+
+    original_path = SettingsRepository._store_path
+    test_store = tmp_path / ".rbr_settings_store.json"
+    try:
+        SettingsRepository.set_store_path(test_store)
+        demo_user = {
+            "user_id": "00000000-0000-0000-0000-000000000001",
+            "email": "albeiro@rbrfinance.com",
+            "is_admin": True,
+        }
+
+        # 1. Update Global Default Model in /admin
+        update_default_ai_model(UpdateDefaultModelRequest(model="gpt-4o"), admin=demo_user)
+
+        # Simulate server restart by clearing cache & reloading from disk
+        SettingsRepository.load_state(force_reload=True)
+
+        diag = get_admin_diagnostics(admin=demo_user)
+        assert diag["system"]["default_ai_model"] == "gpt-4o"
+
+        # Without a custom user credential yet, /settings/ai should also reflect the saved global model
+        ai_cfg = get_ai_credentials(current_user=demo_user)
+        assert ai_cfg["preferred_model"] == "gpt-4o"
+
+        # 2. Save Preferred Model in /settings/ai with token
+        save_ai_credentials(
+            SaveAICredentialRequest(
+                provider="groq",
+                token="gsk_test_token_1234567890",
+                preferred_model="llama-3.3-70b-versatile",
+            ),
+            current_user=demo_user,
+        )
+
+        # Simulate server restart
+        SettingsRepository.load_state(force_reload=True)
+        ai_cfg_after = get_ai_credentials(current_user=demo_user)
+        assert ai_cfg_after["has_credential"] is True
+        assert ai_cfg_after["provider"] == "groq"
+        assert ai_cfg_after["preferred_model"] == "llama-3.3-70b-versatile"
+
+        # 3. Update Preferred Model in /settings/ai WITHOUT re-entering token
+        save_ai_credentials(
+            SaveAICredentialRequest(
+                provider="groq",
+                token=None,
+                preferred_model="deepseek-r1-distill-llama-70b",
+            ),
+            current_user=demo_user,
+        )
+
+        # Simulate server restart
+        SettingsRepository.load_state(force_reload=True)
+        ai_cfg_model_only = get_ai_credentials(current_user=demo_user)
+        assert ai_cfg_model_only["has_credential"] is True
+        assert ai_cfg_model_only["preferred_model"] == "deepseek-r1-distill-llama-70b"
+    finally:
+        SettingsRepository.set_store_path(original_path)
+
+
+def test_voice_command_regression_matrix():
+    from api.agent.reranker import fuzzy_similarity
+
+    user_id = "test-regression-matrix-user"
+    agent = FinanceAgent(user_id)
+
+    # 1. Verify 'gas' is never matched as substring inside 'gaste' or 'gasto'
+    assert fuzzy_similarity("gaste", "gas") < 0.65
+    assert fuzzy_similarity("gasto", "gas") < 0.65
+
+    # 2. Everyday 'Pagué <amount> en <motivo>' must trigger ledger adjustment, NOT invoice selector
+    r_almuerzo = agent.process_voice_command("Pagué 30000 de almuerzo con Nequi")
+    assert r_almuerzo["type"] == "stage_action"
+    assert r_almuerzo["staged_action"]["tool_name"] == "propose_ledger_adjustment"
+    assert r_almuerzo["staged_action"]["target_item"]["name"] == "Nequi"
+    assert r_almuerzo["staged_action"]["target_item"]["delta"] == -30000.0
+
+    r_taxi = agent.process_voice_command("Pagué 50000 en taxi desde mi bolsillo")
+    assert r_taxi["type"] == "stage_action"
+    assert r_taxi["staged_action"]["tool_name"] == "propose_ledger_adjustment"
+    assert r_taxi["staged_action"]["target_item"]["name"] == "Bolsillo"
+    assert r_taxi["staged_action"]["target_item"]["delta"] == -50000.0
+    assert r_taxi["staged_action"]["target_item"]["note"] == "Taxi"
+
+    # 3. 'Pagué el servicio de gas' must match 'Gas 15', NOT 'Servicio 30'
+    r_serv_gas = agent.process_voice_command("Pagué el servicio de gas")
+    assert r_serv_gas["type"] == "stage_action"
+    assert r_serv_gas["staged_action"]["tool_name"] == "propose_toggle_pending_status"
+    assert r_serv_gas["staged_action"]["target_item"]["name"] == "Gas 15"
+
+    # 4. 'Pagué el servicio de agua con Daviplata' must match 'Agua 25' + 'Daviplata', NOT 'Servicio 30'
+    r_serv_agua = agent.process_voice_command("Pagué el servicio de agua con Daviplata")
+    assert r_serv_agua["type"] == "stage_action"
+    assert r_serv_agua["staged_action"]["tool_name"] == "propose_pay_expense_from_account"
+    assert r_serv_agua["staged_action"]["target_item"]["name"] == "Agua 25"
+    assert r_serv_agua["staged_action"]["target_item"]["secondary_item"]["name"] == "Daviplata"
+
+    # 5. 'Le metí 100000 a Nequi' must register +100,000 income in Nequi
+    r_meti_nequi = agent.process_voice_command("Le metí 100000 a Nequi")
+    assert r_meti_nequi["type"] == "stage_action"
+    assert r_meti_nequi["staged_action"]["tool_name"] == "propose_ledger_adjustment"
+    assert r_meti_nequi["staged_action"]["target_item"]["name"] == "Nequi"
+    assert r_meti_nequi["staged_action"]["target_item"]["delta"] == 100000.0
+
+    # 6. 'Me consignaron 200000 en Daviplata' must register +200,000 income in Daviplata (not rent collection)
+    r_consig = agent.process_voice_command("Me consignaron 200000 en Daviplata")
+    assert r_consig["type"] == "stage_action"
+    assert r_consig["staged_action"]["tool_name"] == "propose_ledger_adjustment"
+    assert r_consig["staged_action"]["target_item"]["name"] == "Daviplata"
+    assert r_consig["staged_action"]["target_item"]["delta"] == 200000.0
+
+    # 7. 'Gasté 20000 en efectivo por almuerzo' must register -20,000 in Bolsillo with note 'Almuerzo'
+    r_efectivo = agent.process_voice_command("Gasté 20000 en efectivo por almuerzo")
+    assert r_efectivo["type"] == "stage_action"
+    assert r_efectivo["staged_action"]["tool_name"] == "propose_ledger_adjustment"
+    assert r_efectivo["staged_action"]["target_item"]["name"] == "Bolsillo"
+    assert r_efectivo["staged_action"]["target_item"]["delta"] == -20000.0
+    assert r_efectivo["staged_action"]["target_item"]["note"] == "Almuerzo"
+
+
+
+
 

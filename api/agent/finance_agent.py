@@ -197,11 +197,11 @@ def _identify_goal(text: str) -> Optional[str]:
     for key, name in sorted(GOALS_MAP.items(), key=lambda x: -len(x[0])):
         if re.search(rf"\b{key}\b", clean):
             return name
-    # Fuzzy fallback for phonetic variants (e.g. "ortodonsia", "maestria")
-    words = [w for w in re.findall(r"[a-zñ]+", clean) if len(w) >= 4]
+    # Fuzzy fallback only for long words (>=5 chars) with similar length
+    words = [w for w in re.findall(r"[a-zñ]+", clean) if len(w) >= 5]
     for w in words:
         for key, name in GOALS_MAP.items():
-            if fuzzy_similarity(w, key) >= 0.80:
+            if len(key) >= 5 and abs(len(w) - len(key)) <= 2 and fuzzy_similarity(w, key) >= 0.84:
                 return name
     return None
 
@@ -211,7 +211,7 @@ def _identify_expense(clean_text: str, expenses: List[Dict[str, Any]]) -> Option
         expenses,
         aliases_map=EXPENSE_ALIASES,
         prefer_pending=True,
-        threshold=0.70
+        threshold=0.75
     )
     if ranked:
         return ranked[0][0]["name"]
@@ -738,7 +738,10 @@ class FinanceAgent:
         # 3. Allocate to Financial Goal Intent
         if matched_goal:
             goal_amount = _extract_amount(clean, mask_entity=matched_goal)
-            has_goal_verb = any(v in clean for v in ("abonar", "abono", "asignar", "meter", "aportar", "agregar", "destinar", "ahorrar", "meta"))
+            has_goal_verb = any(
+                v in clean
+                for v in ("abonar", "abono", "abone", "asignar", "meter", "meti", "aportar", "agregar", "destinar", "ahorrar", "ahorre", "guarde", "separe", "meta")
+            )
             if goal_amount is not None and has_goal_verb:
                 staged = self.propose_allocate_goal(matched_goal, goal_amount)
                 return self._finalize_staged_response(staged, enhanced)
@@ -808,8 +811,19 @@ class FinanceAgent:
             staged = self.propose_toggle_pending_status(matched_expense_name, is_paid=False)
             return self._finalize_staged_response(staged, enhanced)
 
-        is_paid_intent = any(kw in clean for kw in ("marcar pagado", "pagado", "pague", "pago", "cancela factura"))
-        if is_paid_intent:
+        is_paid_intent = any(kw in clean for kw in ("marcar pagado", "como pagado", "pagado", "pague", "pago", "cancela factura"))
+        is_explicit_invoice_word = any(
+            w in clean for w in ("factura", "recibo", "servicio", "servicios", "marcar pagado", "como pagado")
+        )
+        explicit_custom_amount = _extract_amount(clean, mask_entity=matched_expense_name) if matched_expense_name else _extract_amount(clean)
+        has_ledger_expense_noun = any(w in clean for w in ("gaste", "gasto", "agregar gasto", "compre"))
+
+        # Only enter recurring invoice payment if:
+        # (a) An explicit invoice word is present ("factura", "recibo", "servicio", "marcar pagado"), OR
+        # (b) A recurring expense name is matched AND the user is not specifying a custom ad-hoc ledger amount
+        if is_paid_intent and not has_ledger_expense_noun and (
+            is_explicit_invoice_word or (matched_expense_name and explicit_custom_amount is None)
+        ):
             source_liq_acc = _identify_liquid_account(clean)
 
             if matched_expense_name:
@@ -866,8 +880,14 @@ class FinanceAgent:
         identified_acc = identified_acc or "Daviplata"
         amount = _extract_amount(clean, mask_entity=identified_acc)
 
-        is_expense_phrase = any(v in clean for v in ("gaste", "gasto", "compre", "retire", "saque", "descuento", "costo"))
-        is_income_phrase = any(v in clean for v in ("abono", "ingreso", "recibi", "recibo", "meti", "deposite"))
+        is_expense_phrase = any(
+            v in clean
+            for v in ("gaste", "gasto", "compre", "pague", "pago", "pagar", "retire", "saque", "descuento", "descontaron", "cobraron", "costo", "salio", "salieron")
+        )
+        is_income_phrase = any(
+            v in clean
+            for v in ("abono", "abonar", "abone", "ingreso", "ingrese", "recibi", "recibo", "meti", "meter", "deposite", "deposito", "consigne", "consigno", "consignaron")
+        )
         is_general_add = any(v in clean for v in ("agregar", "anotar", "ajuste", "movimiento"))
 
         if amount is not None and (is_expense_phrase or is_income_phrase or is_general_add):

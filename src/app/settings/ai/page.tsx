@@ -18,13 +18,32 @@ export default function AISettingsPage() {
   const [testResult, setTestResult] = useState<{ success: boolean; latency?: number; message?: string } | null>(null);
 
   useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const cachedModel =
+        localStorage.getItem('rbr_preferred_ai_model') ||
+        localStorage.getItem('rbr_default_ai_model');
+      const cachedProvider = localStorage.getItem('rbr_preferred_ai_provider');
+      if (cachedModel) setPreferredModel(cachedModel);
+      if (cachedProvider) setProvider(cachedProvider);
+    }
+
     authFetch('/api/py/settings/ai')
       .then((data) => {
+        if (data.preferred_model) {
+          setPreferredModel(data.preferred_model);
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('rbr_preferred_ai_model', data.preferred_model);
+          }
+        }
+        if (data.provider) {
+          setProvider(data.provider);
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('rbr_preferred_ai_provider', data.provider);
+          }
+        }
         if (data.has_credential) {
-          setProvider(data.provider || 'anthropic');
           setAuthMode(data.auth_mode || 'oauth_token');
           setMaskedToken(data.masked_token);
-          setPreferredModel(data.preferred_model || 'claude-3-7-sonnet-latest');
           setLastTestedAt(data.last_tested_at);
         }
       })
@@ -46,7 +65,7 @@ export default function AISettingsPage() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!token.trim()) return;
+    if (!preferredModel.trim() && !token.trim()) return;
 
     setSaving(true);
     setStatusMessage(null);
@@ -56,15 +75,26 @@ export default function AISettingsPage() {
         method: 'POST',
         body: JSON.stringify({
           provider,
-          token: token.trim(),
-          preferred_model: preferredModel,
+          token: token.trim() || undefined,
+          preferred_model: preferredModel.trim(),
         }),
       });
 
-      setMaskedToken(data.masked_token);
-      setAuthMode(data.auth_mode);
+      if (data.masked_token) {
+        setMaskedToken(data.masked_token);
+      }
+      if (data.auth_mode) {
+        setAuthMode(data.auth_mode);
+      }
+      if (data.preferred_model) {
+        setPreferredModel(data.preferred_model);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('rbr_preferred_ai_model', data.preferred_model);
+          localStorage.setItem('rbr_preferred_ai_provider', data.provider || provider);
+        }
+      }
       setToken('');
-      setStatusMessage({ type: 'success', text: data.message || 'Token guardado y cifrado con éxito.' });
+      setStatusMessage({ type: 'success', text: data.message || 'Configuración guardada con éxito.' });
     } catch (err: any) {
       setStatusMessage({ type: 'danger', text: err.message || 'Error al guardar credencial.' });
     } finally {
@@ -254,7 +284,6 @@ export default function AISettingsPage() {
                       }
                       value={token}
                       onChange={(e) => setToken(e.target.value)}
-                      required={!maskedToken}
                     />
                   </div>
                   <div className="form-text">
@@ -288,17 +317,17 @@ export default function AISettingsPage() {
                   <button
                     type="submit"
                     className="btn btn-primary px-4 rounded-pill fw-bold shadow-sm"
-                    disabled={saving || !token.trim()}
+                    disabled={saving || !preferredModel.trim()}
                   >
                     {saving ? (
                       <>
                         <span className="spinner-border spinner-border-sm me-2"></span>
-                        Guardando Cifrado...
+                        Guardando...
                       </>
                     ) : (
                       <>
                         <i className="bi bi-lock-fill me-2"></i>
-                        Guardar Cifrado en Bóveda
+                        {token.trim() ? 'Guardar Cifrado en Bóveda' : 'Guardar Modelo Preferido'}
                       </>
                     )}
                   </button>

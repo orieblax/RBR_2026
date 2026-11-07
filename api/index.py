@@ -12,6 +12,7 @@ from api.commands.finance_commands import FinanceCommandService
 from api.agent.llm_factory import LLMFactory
 from api.agent.finance_agent import FinanceAgent
 from api.core.rate_limit import RateLimiterMiddleware
+from api.repositories.settings_repo import SettingsRepository
 
 settings = get_settings()
 
@@ -33,22 +34,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory storage for AI credentials and admin user management (fallback/dev mode)
-user_credentials_store: Dict[str, Dict[str, Any]] = {}
-users_store: Dict[str, Dict[str, Any]] = {
-    "00000000-0000-0000-0000-000000000001": {
-        "id": "00000000-0000-0000-0000-000000000001",
-        "email": "albeiro@rbrfinance.com",
-        "full_name": "Albeiro Yaime",
-        "is_admin": True,
-        "is_active": True,
-        "default_ai_model": "claude-3-7-sonnet-latest",
-        "created_at": "2026-01-01T00:00:00Z"
-    }
-}
-system_settings = {
-    "default_ai_model": "claude-3-7-sonnet-latest",
-}
+# Persistent settings & credentials state loaded on startup
+SettingsRepository.load_state()
+
 
 @app.get("/api/py/health")
 def health_check():
@@ -170,60 +158,54 @@ def preview_mutation(payload: PreviewMutationRequest, current_user: Dict[str, An
 # --- Phase 3: AI Credentials Setup-Token Module ---
 
 class SaveAICredentialRequest(BaseModel):
-    provider: str
-    token: str
-    preferred_model: Optional[str] = "claude-3-7-sonnet-latest"
+    provider: Optional[str] = "anthropic"
+    token: Optional[str] = None
+    preferred_model: Optional[str] = None
 
 @app.get("/api/py/settings/ai")
 def get_ai_credentials(current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user["user_id"]
-    cred = user_credentials_store.get(user_id)
-    if not cred:
-        return {
-            "has_credential": False,
-            "provider": None,
-            "auth_mode": None,
-            "masked_token": None,
-            "preferred_model": system_settings["default_ai_model"],
-            "last_tested_at": None
-        }
-    return {
-        "has_credential": True,
-        "provider": cred.get("provider"),
-        "auth_mode": cred.get("auth_mode"),
-        "masked_token": cred.get("masked_token"),
-        "preferred_model": cred.get("preferred_model"),
-        "last_tested_at": cred.get("last_tested_at")
-    }
+    return SettingsRepository.get_user_ai_settings(user_id)
 
 @app.post("/api/py/settings/ai")
 def save_ai_credentials(payload: SaveAICredentialRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user["user_id"]
-    raw_token = payload.token.strip()
-    classification = TokenVault.classify_token(raw_token)
-    
-    encrypted = vault.encrypt(raw_token)
-    masked = TokenVault.mask_token(raw_token)
+    raw_token = (payload.token or "").strip()
 
-    cred = {
-        "user_id": user_id,
-        "provider": payload.provider or classification["provider"],
-        "auth_mode": classification["auth_mode"],
-        "encrypted_token": encrypted,
-        "masked_token": masked,
-        "preferred_model": payload.preferred_model or "claude-3-7-sonnet-latest",
-        "last_tested_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat()
-    }
-    user_credentials_store[user_id] = cred
+    if raw_token:
+        classification = TokenVault.classify_token(raw_token)
+        encrypted = vault.encrypt(raw_token)
+        masked = TokenVault.mask_token(raw_token)
+        cred = SettingsRepository.save_user_ai_settings(
+            user_id=user_id,
+            provider=payload.provider or classification["provider"],
+            preferred_model=payload.preferred_model,
+            encrypted_token=encrypted,
+            masked_token=masked,
+            auth_mode=classification["auth_mode"],
+        )
+        return {
+            "status": "success",
+            "message": f"Credencial {classification['label']} y modelo ({cred['preferred_model']}) guardados exitosamente",
+            "provider": cred["provider"],
+            "auth_mode": cred["auth_mode"],
+            "masked_token": cred["masked_token"],
+            "preferred_model": cred["preferred_model"],
+        }
 
+    # Update preferred_model / provider without overwriting or requiring a new token
+    cred = SettingsRepository.save_user_ai_settings(
+        user_id=user_id,
+        provider=payload.provider,
+        preferred_model=payload.preferred_model,
+    )
     return {
         "status": "success",
-        "message": f"Credencial {classification['label']} cifrada y almacenada exitosamente",
+        "message": f"Modelo preferido actualizado a {cred['preferred_model']}",
         "provider": cred["provider"],
         "auth_mode": cred["auth_mode"],
-        "masked_token": masked,
-        "preferred_model": cred["preferred_model"]
+        "masked_token": cred.get("masked_token"),
+        "preferred_model": cred["preferred_model"],
     }
 
 class TestAICredentialRequest(BaseModel):
@@ -234,59 +216,60 @@ class TestAICredentialRequest(BaseModel):
 @app.post("/api/py/settings/ai/test")
 def test_ai_connection(payload: TestAICredentialRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user["user_id"]
-    token_to_test = payload.token
+    token_to_test = (payload.token or "").strip()
 
     if not token_to_test:
-        stored = user_credentials_store.get(user_id)
+        stored = SettingsRepository.get_raw_user_credential(user_id)
         if stored and stored.get("encrypted_token"):
             token_to_test = vault.decrypt(stored["encrypted_token"])
         else:
             raise HTTPException(status_code=400, detail="No hay credenciales registradas para probar.")
 
     result = LLMFactory.ping_test_token(token_to_test, provider=payload.provider, model=payload.model)
-    if result["status"] == "success" and user_id in user_credentials_store:
-        user_credentials_store[user_id]["last_tested_at"] = datetime.utcnow().isoformat()
+    if result["status"] == "success":
+        SettingsRepository.update_last_tested(user_id)
     return result
 
 # --- Phase 3: Admin Module ---
 
 @app.get("/api/py/admin/users")
 def get_admin_users(admin: Dict[str, Any] = Depends(require_admin)):
-    return list(users_store.values())
+    return SettingsRepository.get_users()
 
 @app.post("/api/py/admin/users/{target_user_id}/toggle-role")
 def toggle_user_role(target_user_id: str, admin: Dict[str, Any] = Depends(require_admin)):
-    if target_user_id not in users_store:
+    updated_user = SettingsRepository.toggle_user_role(target_user_id)
+    if not updated_user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    users_store[target_user_id]["is_admin"] = not users_store[target_user_id]["is_admin"]
     return {
         "status": "success",
-        "message": f"Rol de administrador actualizado",
-        "user": users_store[target_user_id]
+        "message": "Rol de administrador actualizado",
+        "user": updated_user
     }
 
 @app.post("/api/py/admin/users/{target_user_id}/toggle-status")
 def toggle_user_status(target_user_id: str, admin: Dict[str, Any] = Depends(require_admin)):
-    if target_user_id not in users_store:
+    updated_user = SettingsRepository.toggle_user_status(target_user_id)
+    if not updated_user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    users_store[target_user_id]["is_active"] = not users_store[target_user_id]["is_active"]
     return {
         "status": "success",
-        "message": f"Estado de usuario actualizado",
-        "user": users_store[target_user_id]
+        "message": "Estado de usuario actualizado",
+        "user": updated_user
     }
 
 @app.get("/api/py/admin/diagnostics")
 def get_admin_diagnostics(admin: Dict[str, Any] = Depends(require_admin)):
+    users = SettingsRepository.get_users()
     return {
         "status": "healthy",
         "system": {
             "environment": settings.ENV,
             "supabase_connected": not settings.SUPABASE_URL.startswith("https://dummy"),
             "encryption_vault_active": True,
-            "total_users": len(users_store),
-            "stored_ai_credentials": len(user_credentials_store),
-            "default_ai_model": system_settings["default_ai_model"]
+            "total_users": len(users),
+            "stored_ai_credentials": SettingsRepository.count_active_credentials(),
+            "default_ai_model": SettingsRepository.get_default_ai_model()
         }
     }
 
@@ -295,11 +278,11 @@ class UpdateDefaultModelRequest(BaseModel):
 
 @app.post("/api/py/admin/default-model")
 def update_default_ai_model(payload: UpdateDefaultModelRequest, admin: Dict[str, Any] = Depends(require_admin)):
-    system_settings["default_ai_model"] = payload.model
+    saved_model = SettingsRepository.set_default_ai_model(payload.model, user_id=admin.get("user_id"))
     return {
         "status": "success",
-        "message": f"Modelo por defecto actualizado a {payload.model}",
-        "default_ai_model": payload.model
+        "message": f"Modelo por defecto actualizado a {saved_model}",
+        "default_ai_model": saved_model
     }
 
 # --- Phase 4: Agno Voice Agent & 2-Step Confirmation ---

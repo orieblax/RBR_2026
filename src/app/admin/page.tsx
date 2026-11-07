@@ -41,7 +41,11 @@ export default function AdminPage() {
       ]);
       setUsers(uData);
       setDiagnostics(dData);
-      setSelectedDefaultModel(dData.system?.default_ai_model || 'claude-3-7-sonnet-latest');
+      const serverModel = dData.system?.default_ai_model || 'claude-3-7-sonnet-latest';
+      setSelectedDefaultModel(serverModel);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rbr_default_ai_model', serverModel);
+      }
     } catch (err) {
       console.error('Error fetching admin data:', err);
     } finally {
@@ -50,6 +54,12 @@ export default function AdminPage() {
   };
 
   useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const cachedDefault = localStorage.getItem('rbr_default_ai_model');
+      if (cachedDefault) {
+        setSelectedDefaultModel(cachedDefault);
+      }
+    }
     fetchData();
   }, []);
 
@@ -77,11 +87,15 @@ export default function AdminPage() {
 
   const handleUpdateModel = async () => {
     try {
-      await authFetch('/api/py/admin/default-model', {
+      const res = await authFetch('/api/py/admin/default-model', {
         method: 'POST',
         body: JSON.stringify({ model: selectedDefaultModel }),
       });
-      setMsg(`Modelo predeterminado actualizado a ${selectedDefaultModel}`);
+      const updated = res.default_ai_model || selectedDefaultModel;
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rbr_default_ai_model', updated);
+      }
+      setMsg(`Modelo predeterminado actualizado a ${updated}`);
       fetchData();
     } catch (e: any) {
       console.error(e);

@@ -12,7 +12,7 @@ def _char_trigrams(text: str) -> set:
 def fuzzy_similarity(a: str, b: str) -> float:
     """
     Combines character trigram Jaccard similarity and SequenceMatcher ratio
-    for fast, zero-dependency fuzzy matching in serverless environments.
+    without partial-word substring false positives (e.g. 'gas' is NOT matched inside 'gaste').
     """
     a_norm = strip_accents(a).lower().strip()
     b_norm = strip_accents(b).lower().strip()
@@ -20,7 +20,11 @@ def fuzzy_similarity(a: str, b: str) -> float:
         return 0.0
     if a_norm == b_norm:
         return 1.0
-    if a_norm in b_norm or b_norm in a_norm:
+    # Only boost whole-word containment across multi-word strings, never partial tokens
+    if (" " in a_norm or " " in b_norm) and (
+        re.search(rf"\b{re.escape(a_norm)}\b", b_norm)
+        or re.search(rf"\b{re.escape(b_norm)}\b", a_norm)
+    ):
         return 0.90
 
     tri_a = _char_trigrams(a_norm)
@@ -31,16 +35,25 @@ def fuzzy_similarity(a: str, b: str) -> float:
     return round(0.5 * jaccard + 0.5 * seq, 4)
 
 
+STOP_TOKENS = {
+    "marcar", "pagado", "pague", "pago", "pagar", "factura", "facturas",
+    "recibo", "recibos", "servicio", "servicios", "arriendo", "meta",
+    "metas", "saldo", "cuenta", "desde", "para", "con", "por", "gaste",
+    "gasto", "gastos", "compre", "agregar", "modificar", "cambiar",
+    "fijar", "transferi", "transferir", "abonar", "abono", "ingreso",
+    "bolsillo", "daviplata", "nequi", "caja", "social", "mil", "pesos",
+}
+
+
 class ReRanker:
     """
     Multi-Signal Candidate Re-Ranker for RBR Finance Manager.
     Scores and re-orders:
     1. Intent / Tool candidates across user phrasing variants.
-    2. Domain entities (expenses, receivables, accounts, goals) with fuzzy + state priors.
+    2. Domain entities (expenses, receivables, accounts, goals) with strict word boundaries + state priors.
     3. Financial history search results.
     """
 
-    # Canonical exemplar templates per tool for semantic/lexical overlap scoring
     TOOL_EXEMPLARS: Dict[str, List[str]] = {
         "propose_undo_last_adjustment": [
             "borrar el ultimo movimiento de cuenta",
@@ -122,15 +135,6 @@ class ReRanker:
         canonical_text: str,
         candidates: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """
-        Scores each candidate tool invocation using 5 weighted signals:
-        - w1 (0.35): Exemplar similarity
-        - w2 (0.25): Slot/entity completeness
-        - w3 (0.15): Fuzzy match quality
-        - w4 (0.15): Database state prior (e.g. pending *1 status)
-        - w5 (0.10): Compound specificity bonus
-        Returns candidates sorted descending by `rerank_score`.
-        """
         scored = []
         for cand in candidates:
             tool_name = cand.get("tool_name", "")
@@ -163,21 +167,24 @@ class ReRanker:
         items: List[Dict[str, Any]],
         aliases_map: Optional[Dict[str, str]] = None,
         prefer_pending: bool = True,
-        threshold: float = 0.52
+        threshold: float = 0.75
     ) -> List[Tuple[Dict[str, Any], float]]:
         """
-        Ranks domain entities (expenses, receivables, accounts, goals) against the utterance.
-        Combines exact token match, alias match, fuzzy token similarity, and pending state prior.
+        Ranks domain entities against the utterance without partial-word false positives.
+        Priority order:
+        1. Full item name exact token match (e.g. 'gas 15', 'servicio 30') -> 0.99
+        2. Specific base name exact token match (e.g. 'gas', 'energia', 'agua') -> 0.95
+        3. Per-item alias exact token match -> 0.92
+        4. Long-word (>=5 chars) phonetic/typo similarity (>=0.84) -> sim * 0.88
         """
         clean = strip_accents(canonical_text).lower()
-        words = [w for w in re.findall(r"[a-zñ0-9]+", clean) if len(w) >= 3]
+        words = [w for w in re.findall(r"[a-zñ0-9]+", clean) if len(w) >= 5 and w not in STOP_TOKENS]
 
-        alias_target = None
+        # Build reverse alias lookup per official item name (lowercase)
+        item_aliases: Dict[str, List[str]] = {}
         if aliases_map:
-            for alias, official in sorted(aliases_map.items(), key=lambda x: -len(x[0])):
-                if re.search(rf"\b{re.escape(alias)}\b", clean):
-                    alias_target = official.lower()
-                    break
+            for alias, official in aliases_map.items():
+                item_aliases.setdefault(official.lower(), []).append(strip_accents(alias).lower())
 
         ranked: List[Tuple[Dict[str, Any], float]] = []
         for item in items:
@@ -186,25 +193,42 @@ class ReRanker:
             base_name = re.sub(r"\s+\d+(?:-\d+)?$", "", name_clean).strip()
 
             base_score = 0.0
-            if alias_target and alias_target == raw_name.lower():
-                base_score = 0.98
-            elif re.search(rf"\b{re.escape(name_clean)}\b", clean):
-                base_score = 0.96
+
+            # 1. Exact full name match (e.g. "gas 15", "servicio 30")
+            if re.search(rf"\b{re.escape(name_clean)}\b", clean):
+                base_score = 0.99
+            # 2. Exact base name match (avoiding generic 'servicio' when used as 'servicio de <x>' or 'un servicio')
             elif base_name and re.search(rf"\b{re.escape(base_name)}\b", clean):
-                base_score = 0.92
+                if base_name == "servicio" and (
+                    re.search(r"\b(?:un|el|la|algun)\s+servicio\b", clean)
+                    or re.search(r"\bservicio\s+de\b", clean)
+                ):
+                    base_score = 0.0
+                else:
+                    base_score = 0.95
             else:
-                # Fuzzy token comparison for slight typos / ASR phonetic variants
-                for w in words:
-                    if w in ("marcar", "pagado", "pague", "pago", "factura", "recibo", "arriendo", "meta", "saldo", "cuenta", "desde", "para", "con", "por"):
+                # 3. Check aliases mapped specifically to this item
+                for al in item_aliases.get(raw_name.lower(), []):
+                    if al in ("servicio", "servicios") and (
+                        re.search(r"\b(?:un|el|la|algun)\s+servicio\b", clean)
+                        or re.search(r"\bservicio\s+de\b", clean)
+                    ):
                         continue
-                    sim = fuzzy_similarity(w, base_name)
-                    if sim >= 0.78 and sim > base_score:
-                        base_score = sim * 0.88
+                    if re.search(rf"\b{re.escape(al)}\b", clean):
+                        base_score = 0.92
+                        break
+
+                # 4. Strict typo tolerance only for long words (>=5 chars)
+                if base_score == 0.0 and len(base_name) >= 5:
+                    for w in words:
+                        if abs(len(w) - len(base_name)) <= 2:
+                            sim = SequenceMatcher(None, w, base_name).ratio()
+                            if sim >= 0.84 and (sim * 0.88) > base_score:
+                                base_score = round(sim * 0.88, 4)
 
             if base_score >= threshold:
-                # Apply pending state prior boost (+0.04 if currently pending)
                 is_pend = item.get("is_pending", not item.get("is_paid", False))
-                prior_boost = 0.04 if (prefer_pending and is_pend) else 0.0
+                prior_boost = 0.03 if (prefer_pending and is_pend) else 0.0
                 final_score = round(min(1.0, base_score + prior_boost), 4)
                 ranked.append((item, final_score))
 
@@ -217,10 +241,6 @@ class ReRanker:
         canonical_text: str,
         options: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """
-        Re-orders disambiguation candidates shown in the ConfirmationModal
-        by relevance to the query and financial impact magnitude.
-        """
         if not options:
             return []
 
@@ -230,7 +250,6 @@ class ReRanker:
             name = opt.get("item_name", "")
             sim = fuzzy_similarity(canonical_text, name)
             amt_norm = abs(float(opt.get("amount", 0.0))) / max_amount
-            # Combine query similarity (70%) + amount significance (30%)
             score = round(0.70 * sim + 0.30 * amt_norm, 4)
             scored.append({**opt, "rerank_score": score})
 
@@ -239,9 +258,6 @@ class ReRanker:
 
     @classmethod
     def rerank_history_results(cls, query: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Re-ranks financial history search hits by lexical + fuzzy similarity.
-        """
         if not results:
             return []
         scored = []

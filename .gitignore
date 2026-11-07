@@ -39,3 +39,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local persistent settings store
+.rbr_settings_store.json
+
