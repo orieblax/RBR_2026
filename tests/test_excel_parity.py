@@ -142,3 +142,91 @@ def test_vercel_bundle_limits():
     forbidden = ["torch", "transformers", "sentence-transformers", "scipy", "tensorflow"]
     for pkg in forbidden:
         assert pkg not in reqs, f"Heavy dependency '{pkg}' violates Vercel 250MB serverless limit"
+
+def test_use_case_1_natural_expense_bolsillo():
+    user_id = "test-case-1-user"
+    agent = FinanceAgent(user_id)
+    cmd = "Gasté 50000 en transporte desde mi bolsillo"
+    res = agent.process_voice_command(cmd)
+
+    assert res["type"] == "stage_action"
+    staged = res["staged_action"]
+    assert staged["tool_name"] == "propose_ledger_adjustment"
+    assert staged["target_item"]["name"] == "Bolsillo"
+    assert staged["target_item"]["before_value"] == 205000.0
+    assert staged["target_item"]["after_value"] == 155000.0
+    assert staged["target_item"]["delta"] == -50000.0
+    assert staged["target_item"]["note"] == "Transporte"
+
+    # Confirm
+    agent.confirm_action(staged["action_id"])
+    summary = agent.query_service.get_dashboard_summary()
+    bolsillo = next(a for a in summary["liquid_accounts"] if a["name"] == "Bolsillo")
+    assert bolsillo["calculated_total"] == 155000.0
+
+def test_use_case_2_thousands_with_spaces_daviplata():
+    user_id = "test-case-2-user"
+    agent = FinanceAgent(user_id)
+    cmd = "Agregar gasto en Daviplata de 50 000 por mercado"
+    res = agent.process_voice_command(cmd)
+
+    assert res["type"] == "stage_action"
+    staged = res["staged_action"]
+    assert staged["tool_name"] == "propose_ledger_adjustment"
+    assert staged["target_item"]["name"] == "Daviplata"
+    assert staged["target_item"]["delta"] == -50000.0
+    assert staged["target_item"]["delta"] != -50.0  # Must not truncate at whitespace!
+    assert staged["target_item"]["note"] == "Mercado"
+
+def test_use_case_3_direct_account_balance_modification():
+    user_id = "test-case-3-user"
+    agent = FinanceAgent(user_id)
+
+    # 1. Direct set on Bolsillo
+    res1 = agent.process_voice_command("Modificar el saldo de Bolsillo a 300000")
+    assert res1["type"] == "stage_action"
+    staged1 = res1["staged_action"]
+    assert staged1["tool_name"] == "propose_set_account_balance"
+    assert staged1["target_item"]["name"] == "Bolsillo"
+    assert staged1["target_item"]["after_value"] == 300000.0
+    agent.confirm_action(staged1["action_id"])
+
+    summary1 = agent.query_service.get_dashboard_summary()
+    bolsillo = next(a for a in summary1["liquid_accounts"] if a["name"] == "Bolsillo")
+    assert bolsillo["calculated_total"] == 300000.0
+
+    # 2. Direct set on Daviplata with space thousands
+    res2 = agent.process_voice_command("Fijar Daviplata en 150 000")
+    assert res2["type"] == "stage_action"
+    staged2 = res2["staged_action"]
+    assert staged2["tool_name"] == "propose_set_account_balance"
+    assert staged2["target_item"]["name"] == "Daviplata"
+    assert staged2["target_item"]["after_value"] == 150000.0
+    agent.confirm_action(staged2["action_id"])
+
+    summary2 = agent.query_service.get_dashboard_summary()
+    davi = next(a for a in summary2["liquid_accounts"] if a["name"] == "Daviplata")
+    assert davi["calculated_total"] == 150000.0
+
+def test_use_case_4_fuzzy_invoice_and_disambiguation():
+    user_id = "test-case-4-user"
+    agent = FinanceAgent(user_id)
+
+    # 1. Fuzzy match "Gas" -> "Gas 15"
+    res = agent.process_voice_command("Marcar pagado Gas")
+    assert res["type"] == "stage_action"
+    staged = res["staged_action"]
+    assert staged["tool_name"] == "propose_toggle_pending_status"
+    assert staged["target_item"]["name"] == "Gas 15"
+    assert staged["target_item"]["after_status"] == "Pagado"
+
+    # 2. Generic ambiguous bill command returns candidate list
+    res_ambiguous = agent.process_voice_command("pagué una factura")
+    assert res_ambiguous["type"] == "stage_action"
+    staged_amb = res_ambiguous["staged_action"]
+    assert len(staged_amb["candidates"]) > 0
+    # Candidate can be confirmed
+    chosen_candidate = staged_amb["candidates"][0]
+    confirm_res = agent.confirm_action(staged_amb["action_id"], selected_candidate=chosen_candidate)
+    assert confirm_res["status"] == "success"
+

@@ -16,20 +16,38 @@ export function ConfirmationModal({
   onConfirmed,
 }: ConfirmationModalProps) {
   const [loading, setLoading] = useState(false);
+  const [selectedCandidate, setSelectedCandidate] = useState<any>(null);
 
   if (!stagedAction) return null;
 
-  const { tool_name, preview_summary, impact_delta, kpis_before, kpis_after, action_id } = stagedAction;
+  const {
+    tool_name,
+    preview_summary,
+    impact_delta,
+    kpis_before,
+    kpis_after,
+    action_id,
+    target_item,
+    candidates,
+  } = stagedAction;
 
-  const deltaRestante = impact_delta?.delta_restante ?? 0;
-  const deltaInclPend = impact_delta?.delta_incl_pend ?? 0;
+  const hasCandidates = Array.isArray(candidates) && candidates.length > 0;
+  const activeCandidate = selectedCandidate || (hasCandidates ? candidates[0] : null);
+
+  // If a candidate is selected, use candidate metrics if available
+  const deltaRestante = activeCandidate?.delta_restante ?? impact_delta?.delta_restante ?? 0;
+  const deltaInclPend = activeCandidate?.delta_incl_pend ?? impact_delta?.delta_incl_pend ?? 0;
+  const displayTarget = activeCandidate?.target_item || target_item;
 
   const handleConfirm = async () => {
     setLoading(true);
     try {
       await authFetch('/api/py/voice/confirm', {
         method: 'POST',
-        body: JSON.stringify({ action_id }),
+        body: JSON.stringify({
+          action_id,
+          selected_candidate: activeCandidate,
+        }),
       });
       onConfirmed();
     } catch (err) {
@@ -68,13 +86,101 @@ export function ConfirmationModal({
           </div>
 
           <div className="modal-body p-4">
+            {/* Action Summary Alert */}
             <div className="alert alert-primary d-flex align-items-center mb-3 py-2 px-3 rounded-3" role="alert">
               <i className="bi bi-mic-fill text-primary me-2 fs-5"></i>
-              <div className="small fw-semibold">{preview_summary || 'Acción solicitada por voz'}</div>
+              <div className="small fw-semibold">
+                {activeCandidate ? activeCandidate.preview_summary : preview_summary || 'Acción solicitada por voz'}
+              </div>
             </div>
 
-            <h6 className="fw-bold text-dark small text-uppercase text-muted mb-2">Impacto en tus métricas:</h6>
+            {/* Target Item Highlight Card (Direct Account or Invoice Change) */}
+            {displayTarget && (
+              <div className="card border-0 bg-light-subtle rounded-3 p-3 mb-3 border-start border-4 border-primary shadow-sm">
+                <div className="d-flex justify-content-between align-items-center mb-2">
+                  <span className="badge bg-primary-subtle text-primary fw-semibold px-2 py-1">
+                    {displayTarget.category_label || 'Movimiento'}
+                  </span>
+                  {displayTarget.note && (
+                    <span className="badge bg-secondary-subtle text-secondary fw-normal">
+                      <i className="bi bi-tag me-1"></i>
+                      {displayTarget.note}
+                    </span>
+                  )}
+                </div>
 
+                <div className="d-flex justify-content-between align-items-baseline">
+                  <div>
+                    <h5 className="fw-bold mb-0 text-dark">{displayTarget.name}</h5>
+                    <small className="text-muted">
+                      {displayTarget.before_status ? (
+                        <>
+                          Estado actual:{' '}
+                          <span className="badge bg-warning-subtle text-warning-emphasis">
+                            {displayTarget.before_status}
+                          </span>
+                        </>
+                      ) : (
+                        `Saldo anterior: ${formatCOP(displayTarget.before_value)}`
+                      )}
+                    </small>
+                  </div>
+
+                  <div className="text-end">
+                    <div className="fs-5 fw-bold text-primary">
+                      {displayTarget.after_status ? (
+                        <span className="badge bg-success">{displayTarget.after_status}</span>
+                      ) : (
+                        formatCOP(displayTarget.after_value)
+                      )}
+                    </div>
+                    {displayTarget.delta !== undefined && (
+                      <small className={`fw-semibold ${displayTarget.delta >= 0 ? 'text-success' : 'text-danger'}`}>
+                        {displayTarget.delta >= 0
+                          ? `+${formatCOP(displayTarget.delta)}`
+                          : `-${formatCOP(Math.abs(displayTarget.delta))}`}
+                      </small>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Disambiguation Candidates (Case 4: Ante la duda, coloca en el prompt las posibles opciones) */}
+            {hasCandidates && (
+              <div className="mb-3">
+                <label className="form-label small fw-bold text-muted text-uppercase mb-2">
+                  <i className="bi bi-question-circle me-1 text-primary"></i>
+                  Selecciona la factura a marcar como pagada:
+                </label>
+                <div className="list-group list-group-flush border rounded-3 overflow-hidden shadow-sm">
+                  {candidates.map((cand: any, idx: number) => {
+                    const isSelected = (activeCandidate?.item_name || candidates[0].item_name) === cand.item_name;
+                    return (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => setSelectedCandidate(cand)}
+                        className={`list-group-item list-group-item-action d-flex justify-content-between align-items-center p-2.5 ${
+                          isSelected ? 'active bg-primary text-white' : ''
+                        }`}
+                      >
+                        <div className="d-flex align-items-center gap-2">
+                          <i className={`bi ${isSelected ? 'bi-check-circle-fill' : 'bi-circle'} fs-6`}></i>
+                          <span className="fw-semibold">{cand.item_name}</span>
+                        </div>
+                        <span className={`badge ${isSelected ? 'bg-light text-primary' : 'bg-secondary-subtle text-dark'}`}>
+                          {formatCOP(cand.amount)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Impact on Key Financial Metrics */}
+            <h6 className="fw-bold text-dark small text-uppercase text-muted mb-2">Impacto en tus métricas:</h6>
             <div className="row g-2 mb-3">
               {/* Impact on Restante */}
               <div className="col-6">

@@ -17,6 +17,7 @@ class FinanceCommandService:
         temp_dataset = copy.deepcopy(original_dataset)
 
         kpis_before = FinancialCalculator.calculate_full_kpis(temp_dataset)
+        target_item: Optional[Dict[str, Any]] = None
 
         # Apply mutation onto deepcopy
         if mutation_type == "add_ledger_adjustment":
@@ -33,16 +34,70 @@ class FinanceCommandService:
             }
             target_list = temp_dataset.get("liquid_accounts" if parent_type == "liquid_account" else "receivables", [])
             for item in target_list:
-                if item.get("name", "").lower() == target_name.lower():
+                if item.get("name", "").lower() == target_name.lower() or target_name.lower() in item.get("name", "").lower():
+                    before_val = FinancialCalculator.calculate_liquid_account_total(item)
                     item.setdefault("adjustments", []).append(adj)
+                    after_val = FinancialCalculator.calculate_liquid_account_total(item)
+                    target_item = {
+                        "name": item.get("name", target_name),
+                        "category_label": "Cuenta Líquida" if parent_type == "liquid_account" else "Cuenta por Cobrar",
+                        "before_value": before_val,
+                        "after_value": after_val,
+                        "delta": amount,
+                        "note": note or ("Gasto" if amount < 0 else "Abono")
+                    }
+                    break
+
+        elif mutation_type == "set_account_balance":
+            parent_type = payload.get("parent_type", "liquid_account")
+            target_name = payload.get("target_name", "")
+            new_balance = float(payload.get("new_balance", 0.0))
+            note = payload.get("note", "")
+
+            target_list = temp_dataset.get("liquid_accounts" if parent_type == "liquid_account" else "receivables", [])
+            for item in target_list:
+                if item.get("name", "").lower() == target_name.lower() or target_name.lower() in item.get("name", "").lower():
+                    before_val = FinancialCalculator.calculate_liquid_account_total(item)
+                    delta = new_balance - before_val
+                    if len(item.get("adjustments", [])) == 0 and float(item.get("base_amount", 0.0)) > 0:
+                        item["base_amount"] = new_balance
+                    else:
+                        item.setdefault("adjustments", []).append({
+                            "amount": delta,
+                            "factor": 1.0,
+                            "is_active": True,
+                            "note": note or "Actualización de saldo"
+                        })
+                    after_val = new_balance
+                    target_item = {
+                        "name": item.get("name", target_name),
+                        "category_label": "Cuenta Líquida" if parent_type == "liquid_account" else "Cuenta por Cobrar",
+                        "before_value": before_val,
+                        "after_value": after_val,
+                        "delta": delta,
+                        "note": note or "Actualización de saldo"
+                    }
                     break
 
         elif mutation_type == "toggle_pending_status":
             item_name = payload.get("item_name", "")
             is_paid = payload.get("is_paid", True)
             for exp in temp_dataset.get("recurring_expenses", []):
-                if exp.get("name", "").lower() == item_name.lower():
+                if exp.get("name", "").lower() == item_name.lower() or item_name.lower() in exp.get("name", "").lower():
+                    cost = float(exp.get("recurrent_base", 0.0))
+                    before_status = "Pendiente" if exp.get("is_pending", True) else "Pagado"
                     exp["is_pending"] = not is_paid
+                    after_status = "Pagado" if is_paid else "Pendiente"
+                    target_item = {
+                        "name": exp.get("name", item_name),
+                        "category_label": "Gasto Recurrente",
+                        "before_value": cost if before_status == "Pendiente" else 0.0,
+                        "after_value": 0.0 if is_paid else cost,
+                        "before_status": before_status,
+                        "after_status": after_status,
+                        "delta": -cost if is_paid else cost,
+                        "note": "Marcar como pagado (*0)" if is_paid else "Marcar como pendiente (*1)"
+                    }
                     break
 
         elif mutation_type == "update_item_amount":
@@ -51,10 +106,19 @@ class FinanceCommandService:
             new_amount = float(payload.get("new_amount", 0.0))
             for item in temp_dataset.get(category, []):
                 if item.get("name", "").lower() == item_name.lower():
+                    before_val = float(item.get("recurrent_base", item.get("base_amount", 0.0)))
                     if category == "recurring_expenses":
                         item["recurrent_base"] = new_amount
                     else:
                         item["base_amount"] = new_amount
+                    target_item = {
+                        "name": item.get("name", item_name),
+                        "category_label": category,
+                        "before_value": before_val,
+                        "after_value": new_amount,
+                        "delta": new_amount - before_val,
+                        "note": "Actualizar monto"
+                    }
                     break
 
         kpis_after = FinancialCalculator.calculate_full_kpis(temp_dataset)
@@ -65,6 +129,8 @@ class FinanceCommandService:
         return {
             "mutation_type": mutation_type,
             "payload": payload,
+            "target_item": target_item,
+            "candidates": payload.get("candidates", []),
             "kpis_before": {
                 "restante": kpis_before.restante,
                 "incl_pend": kpis_before.incl_pend,
@@ -134,4 +200,14 @@ class FinanceCommandService:
             "status": "success" if updated else "error",
             "message": f"Meta {goal_name} actualizada",
             "updated_goal": updated
+        }
+
+    def execute_set_account_balance(self, parent_type: str, target_name: str, new_balance: float, note: str = "") -> Dict[str, Any]:
+        result = self.repo.set_account_balance(parent_type, target_name, new_balance, note)
+        kpis = FinancialCalculator.calculate_full_kpis(self.repo.get_dataset())
+        return {
+            "status": "success" if result.get("status") == "success" else "error",
+            "message": f"Saldo de {result.get('target_name', target_name)} actualizado a ${new_balance:,.2f}",
+            "result": result,
+            "kpis": kpis.model_dump()
         }

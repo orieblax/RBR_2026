@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useVoiceRecognition } from '@/hooks/useVoiceRecognition';
 import { authFetch } from '@/lib/api';
 
@@ -42,9 +42,10 @@ export function VoiceCommandBar({ onStageAction, onRefreshData }: VoiceCommandBa
     }
   };
 
-  const { isListening, transcript, isSupported, startListening, stopListening } =
+  const { isListening, isSupported, audioLevel, startListening, stopListening } =
     useVoiceRecognition({
       lang: 'es-CO',
+      silenceTimeoutMs: 1800,
       onResult: (text, isFinal) => {
         setInputText(text);
         if (isFinal) {
@@ -56,7 +57,10 @@ export function VoiceCommandBar({ onStageAction, onRefreshData }: VoiceCommandBa
   return (
     <div className="voice-bar-container">
       {agentReply && (
-        <div className="alert alert-info alert-dismissible fade show shadow-sm rounded-4 mb-2 py-2 px-3 small border-0 d-flex align-items-center justify-content-between" role="alert">
+        <div
+          className="alert alert-info alert-dismissible fade show shadow-sm rounded-4 mb-2 py-2 px-3 small border-0 d-flex align-items-center justify-content-between"
+          role="alert"
+        >
           <div className="d-flex align-items-center gap-2">
             <i className="bi bi-robot text-primary fs-5"></i>
             <span>{agentReply}</span>
@@ -82,27 +86,49 @@ export function VoiceCommandBar({ onStageAction, onRefreshData }: VoiceCommandBa
           <button
             type="button"
             onClick={isListening ? stopListening : startListening}
-            className={`btn voice-pulse-btn ${isListening ? 'listening btn-danger' : 'btn-primary'} text-white border-0`}
-            title={isListening ? 'Detener escucha' : 'Activar micrófono por voz (es-CO)'}
+            className={`btn voice-pulse-btn ${
+              isListening ? 'listening btn-danger' : 'btn-primary'
+            } text-white border-0`}
+            title={isListening ? 'Detener escucha' : 'Activar micrófono por voz con Auto-Gain (es-CO)'}
             disabled={!isSupported && false}
           >
             <i className={`bi ${isListening ? 'bi-mic-fill' : 'bi-mic'}`}></i>
           </button>
 
-          {/* Transcript / Input */}
-          <div className="flex-grow-1 px-2">
+          {/* Transcript / Input + Volume Meter */}
+          <div className="flex-grow-1 px-2 position-relative">
             <input
               type="text"
               className="form-control border-0 shadow-none bg-transparent"
               placeholder={
                 isListening
-                  ? 'Escuchando en español (Colombia)...'
-                  : 'Prueba: "Marcar pagado Energía 20" o "¿Cuánto puedo invertir?"'
+                  ? 'Escuchando en español... Habla natural, espera 1.8s o pulsa Enviar'
+                  : 'Prueba: "Gasté 50000 en transporte desde mi bolsillo" o "Marcar pagado Gas"'
               }
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
               disabled={isProcessing}
             />
+
+            {/* Visual Live Audio Level Indicator */}
+            {isListening && (
+              <div
+                className="progress position-absolute bottom-0 start-0 w-100"
+                style={{ height: '3px', borderRadius: '0' }}
+              >
+                <div
+                  className="progress-bar bg-success transition-all"
+                  role="progressbar"
+                  style={{
+                    width: `${Math.max(5, audioLevel)}%`,
+                    transition: 'width 0.1s ease',
+                  }}
+                  aria-valuenow={audioLevel}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                ></div>
+              </div>
+            )}
           </div>
 
           {/* Send / Status */}
@@ -111,6 +137,7 @@ export function VoiceCommandBar({ onStageAction, onRefreshData }: VoiceCommandBa
             className="btn btn-light rounded-circle shadow-sm"
             style={{ width: '42px', height: '42px' }}
             disabled={!inputText.trim() || isProcessing}
+            title="Enviar comando"
           >
             {isProcessing ? (
               <span className="spinner-border spinner-border-sm text-primary"></span>

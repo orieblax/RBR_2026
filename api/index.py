@@ -314,10 +314,11 @@ def process_voice_command(payload: VoiceCommandRequest, current_user: Dict[str, 
 
 class ActionActionRequest(BaseModel):
     action_id: str
+    selected_candidate: Optional[Dict[str, Any]] = None
 
 @app.post("/api/py/voice/confirm")
 def confirm_voice_action(payload: ActionActionRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
-    return FinanceAgent.confirm_action(payload.action_id)
+    return FinanceAgent.confirm_action(payload.action_id, selected_candidate=payload.selected_candidate)
 
 @app.post("/api/py/voice/cancel")
 def cancel_voice_action(payload: ActionActionRequest, current_user: Dict[str, Any] = Depends(get_current_user)):

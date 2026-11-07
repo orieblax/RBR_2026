@@ -136,3 +136,60 @@ class FinanceRepository:
                 goal["allocated_amount"] = max(0.0, float(goal.get("allocated_amount", 0.0)) + float(allocated_delta))
                 return goal
         return None
+
+    def set_account_balance(
+        self,
+        parent_type: str,
+        parent_identifier: str,
+        new_balance: float,
+        note: str = ""
+    ) -> Dict[str, Any]:
+        dataset = self._local_store[self.user_id]
+        target_list = dataset.get("liquid_accounts" if parent_type == "liquid_account" else "receivables", [])
+
+        target_item = None
+        for item in target_list:
+            if item.get("id") == parent_identifier or item.get("name", "").lower() == parent_identifier.lower():
+                target_item = item
+                break
+
+        if not target_item and target_list:
+            # Fallback search by token
+            clean_id = parent_identifier.lower()
+            for item in target_list:
+                if clean_id in item.get("name", "").lower() or item.get("name", "").lower() in clean_id:
+                    target_item = item
+                    break
+
+        if not target_item:
+            return {"status": "error", "message": f"Cuenta {parent_identifier} no encontrada", "target_name": parent_identifier}
+
+        from api.domain.calculator import FinancialCalculator
+        current_val = FinancialCalculator.calculate_liquid_account_total(target_item)
+        target_balance = float(new_balance)
+        delta = target_balance - current_val
+
+        # If account has no adjustments and base_amount is used, set base_amount directly
+        if len(target_item.get("adjustments", [])) == 0 and float(target_item.get("base_amount", 0.0)) > 0:
+            target_item["base_amount"] = target_balance
+        else:
+            # Add inline reconciliation adjustment
+            adj = {
+                "id": str(uuid.uuid4()),
+                "user_id": self.user_id,
+                "parent_type": parent_type,
+                "amount": delta,
+                "factor": 1.0,
+                "is_active": True,
+                "note": note or "Actualización de saldo",
+                "created_at": datetime.utcnow().isoformat()
+            }
+            target_item.setdefault("adjustments", []).append(adj)
+
+        return {
+            "status": "success",
+            "target_name": target_item.get("name", parent_identifier),
+            "delta": delta,
+            "new_balance": target_balance,
+            "item": target_item
+        }
