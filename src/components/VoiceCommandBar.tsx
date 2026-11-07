@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { useVoiceRecognition } from '@/hooks/useVoiceRecognition';
 import { authFetch } from '@/lib/api';
 
@@ -14,42 +14,53 @@ export function VoiceCommandBar({ onStageAction, onRefreshData }: VoiceCommandBa
   const [isProcessing, setIsProcessing] = useState(false);
   const [agentReply, setAgentReply] = useState<string | null>(null);
 
-  const handleCommandSubmit = async (commandText: string) => {
-    if (!commandText.trim()) return;
-    setIsProcessing(true);
-    setAgentReply(null);
+  const handleCommandSubmit = useCallback(
+    async (commandText: string) => {
+      const cleanCommand = commandText.trim();
+      if (!cleanCommand) return;
 
-    try {
-      const data = await authFetch('/api/py/voice/command', {
-        method: 'POST',
-        body: JSON.stringify({ command: commandText.trim() }),
-      });
-
-      if (data.type === 'stage_action') {
-        onStageAction(data.staged_action);
-      } else if (data.reply) {
-        setAgentReply(data.reply);
-        if (data.needs_refresh) {
-          onRefreshData();
-        }
-      }
-    } catch (err: any) {
-      console.error('Error executing voice command:', err);
-      setAgentReply(err.message || 'Error de comunicación con el asistente de voz.');
-    } finally {
-      setIsProcessing(false);
+      // Immediately clear input text upon detecting/submitting the command
       setInputText('');
-    }
-  };
+      setIsProcessing(true);
+      setAgentReply(null);
+
+      try {
+        const data = await authFetch('/api/py/voice/command', {
+          method: 'POST',
+          body: JSON.stringify({ command: cleanCommand }),
+        });
+
+        if (data.type === 'stage_action') {
+          onStageAction(data.staged_action);
+        } else if (data.reply) {
+          setAgentReply(data.reply);
+          if (data.needs_refresh) {
+            onRefreshData();
+          }
+        }
+      } catch (err: any) {
+        console.error('Error executing voice command:', err);
+        setAgentReply(err.message || 'Error de comunicación con el asistente de voz.');
+      } finally {
+        setIsProcessing(false);
+        setInputText('');
+      }
+    },
+    [onStageAction, onRefreshData]
+  );
 
   const { isListening, isSupported, audioLevel, startListening, stopListening } =
     useVoiceRecognition({
       lang: 'es-CO',
-      silenceTimeoutMs: 1800,
+      silenceTimeoutMs: 1200,
       onResult: (text, isFinal) => {
-        setInputText(text);
         if (isFinal) {
+          // 1. Stop listening, 2. Delete input text, 3. Submit & Show Modal
+          stopListening();
+          setInputText('');
           handleCommandSubmit(text);
+        } else {
+          setInputText(text);
         }
       },
     });
@@ -78,7 +89,11 @@ export function VoiceCommandBar({ onStageAction, onRefreshData }: VoiceCommandBa
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            handleCommandSubmit(inputText);
+            const textToSubmit = inputText.trim();
+            if (!textToSubmit) return;
+            stopListening();
+            setInputText('');
+            handleCommandSubmit(textToSubmit);
           }}
           className="d-flex align-items-center gap-2"
         >
@@ -102,7 +117,7 @@ export function VoiceCommandBar({ onStageAction, onRefreshData }: VoiceCommandBa
               className="form-control border-0 shadow-none bg-transparent"
               placeholder={
                 isListening
-                  ? 'Escuchando en español... Habla natural, espera 1.8s o pulsa Enviar'
+                  ? 'Escuchando... Al terminar tu frase se enviará automáticamente'
                   : 'Prueba: "Gasté 50000 en transporte desde mi bolsillo" o "Marcar pagado Gas"'
               }
               value={inputText}

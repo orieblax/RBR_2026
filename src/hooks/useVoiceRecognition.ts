@@ -10,7 +10,7 @@ interface UseVoiceRecognitionOptions {
 }
 
 export function useVoiceRecognition(options: UseVoiceRecognitionOptions = {}) {
-  const { lang = 'es-CO', silenceTimeoutMs = 1800, onResult, onError } = options;
+  const { lang = 'es-CO', silenceTimeoutMs = 1200, onResult, onError } = options;
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [isSupported, setIsSupported] = useState(true);
@@ -23,6 +23,19 @@ export function useVoiceRecognition(options: UseVoiceRecognitionOptions = {}) {
   const animFrameRef = useRef<number | null>(null);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const accumulatedTextRef = useRef<string>('');
+  const isFinalizedRef = useRef<boolean>(false);
+
+  // Keep latest callbacks in refs so SpeechRecognition is never recreated mid-speech
+  const onResultRef = useRef(onResult);
+  const onErrorRef = useRef(onError);
+
+  useEffect(() => {
+    onResultRef.current = onResult;
+  }, [onResult]);
+
+  useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
 
   // Clean audio meter and hardware microphone stream
   const stopAudioMeter = useCallback(() => {
@@ -38,8 +51,26 @@ export function useVoiceRecognition(options: UseVoiceRecognitionOptions = {}) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
     }
+    analyserRef.current = null;
     setAudioLevel(0);
   }, []);
+
+  const stopListening = useCallback(() => {
+    isFinalizedRef.current = true;
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (_) {}
+    }
+    stopAudioMeter();
+    accumulatedTextRef.current = '';
+    setTranscript('');
+    setIsListening(false);
+  }, [stopAudioMeter]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -61,45 +92,77 @@ export function useVoiceRecognition(options: UseVoiceRecognitionOptions = {}) {
       };
 
       recognition.onresult = (event: any) => {
+        // Ignore any trailing events after command was already detected and stopped
+        if (isFinalizedRef.current) {
+          return;
+        }
+
         let fullTranscript = '';
         for (let i = 0; i < event.results.length; i++) {
           fullTranscript += event.results[i][0].transcript + ' ';
         }
         const cleanText = fullTranscript.trim();
+        if (!cleanText) return;
+
         accumulatedTextRef.current = cleanText;
         setTranscript(cleanText);
 
-        if (onResult) {
-          onResult(cleanText, false);
+        if (onResultRef.current) {
+          onResultRef.current(cleanText, false);
         }
 
-        // Reset silence timer on every new detected speech
+        // Reset silence timer on every new detected word
         if (silenceTimerRef.current) {
           clearTimeout(silenceTimerRef.current);
         }
 
         silenceTimerRef.current = setTimeout(() => {
-          if (accumulatedTextRef.current.trim()) {
-            if (onResult) {
-              onResult(accumulatedTextRef.current.trim(), true);
-            }
+          const finalCommand = accumulatedTextRef.current.trim();
+          if (finalCommand && !isFinalizedRef.current) {
+            // 1. Mark finalized & stop listening immediately
+            isFinalizedRef.current = true;
             if (recognitionRef.current) {
               try {
                 recognitionRef.current.stop();
               } catch (_) {}
+            }
+            stopAudioMeter();
+            setIsListening(false);
+
+            // 2. Delete transcript state
+            accumulatedTextRef.current = '';
+            setTranscript('');
+
+            // 3. Emit final command to trigger modal & clear input
+            if (onResultRef.current) {
+              onResultRef.current(finalCommand, true);
             }
           }
         }, silenceTimeoutMs);
       };
 
       recognition.onerror = (event: any) => {
-        if (event.error !== 'no-speech') {
+        if (event.error !== 'no-speech' && event.error !== 'aborted') {
           console.warn('SpeechRecognition error:', event.error);
         }
-        if (onError) onError(event);
+        if (onErrorRef.current) onErrorRef.current(event);
       };
 
       recognition.onend = () => {
+        // If browser ended recognition naturally and we have unsubmitted text, finalize it now
+        const pendingText = accumulatedTextRef.current.trim();
+        if (pendingText && !isFinalizedRef.current) {
+          isFinalizedRef.current = true;
+          if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = null;
+          }
+          accumulatedTextRef.current = '';
+          setTranscript('');
+          if (onResultRef.current) {
+            onResultRef.current(pendingText, true);
+          }
+        }
         setIsListening(false);
         stopAudioMeter();
       };
@@ -108,13 +171,20 @@ export function useVoiceRecognition(options: UseVoiceRecognitionOptions = {}) {
     }
 
     return () => {
+      isFinalizedRef.current = true;
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch (_) {}
+      }
       stopAudioMeter();
     };
-  }, [lang, silenceTimeoutMs, onResult, onError, stopAudioMeter]);
+  }, [lang, silenceTimeoutMs, stopAudioMeter]);
 
   const startListening = useCallback(async () => {
     if (!isSupported) return;
+    isFinalizedRef.current = false;
     accumulatedTextRef.current = '';
     setTranscript('');
 
@@ -170,21 +240,7 @@ export function useVoiceRecognition(options: UseVoiceRecognitionOptions = {}) {
         console.error('Error starting recognition:', e);
       }
     }
-  }, [isSupported, stopAudioMeter]);
-
-  const stopListening = useCallback(() => {
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = null;
-    }
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (e) {}
-    }
-    stopAudioMeter();
-    setIsListening(false);
-  }, [stopAudioMeter]);
+  }, [isSupported]);
 
   return {
     isListening,
