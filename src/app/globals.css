@@ -1,0 +1,89 @@
+@import 'bootstrap/dist/css/bootstrap.min.css';
+@import 'bootstrap-icons/font/bootstrap-icons.css';
+
+:root {
+  --primary-navy: #0f172a;
+  --primary-blue: #2563eb;
+  --accent-emerald: #10b981;
+  --accent-amber: #f59e0b;
+  --accent-rose: #ef4444;
+  --card-bg: #ffffff;
+  --body-bg: #f8fafc;
+}
+
+body {
+  background-color: var(--body-bg);
+  color: #1e293b;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  min-height: 100vh;
+}
+
+.kpi-card {
+  border: none;
+  border-radius: 1rem;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.kpi-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.08);
+}
+
+.kpi-card.highlight {
+  background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%);
+  color: #ffffff;
+}
+
+.kpi-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.voice-pulse-btn {
+  position: relative;
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.4rem;
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4);
+  transition: all 0.2s ease;
+}
+
+.voice-pulse-btn.listening {
+  background-color: #ef4444 !important;
+  border-color: #ef4444 !important;
+  animation: pulse-ring 1.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 14px rgba(239, 68, 68, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+  }
+}
+
+.voice-bar-container {
+  position: fixed;
+  bottom: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 90%;
+  max-width: 650px;
+  z-index: 1040;
+}
+
+.ledger-drawer {
+  background: #f1f5f9;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+}

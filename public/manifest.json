@@ -1,0 +1,26 @@
+{
+  "name": "RBR Finance Manager",
+  "short_name": "RBR Finance",
+  "description": "Gestor financiero personal y cálculo exacto de excedente invertible por voz (es-CO)",
+  "start_url": "/dashboard",
+  "id": "/dashboard",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "lang": "es-CO",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

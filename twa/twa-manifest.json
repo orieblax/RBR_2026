@@ -1,0 +1,42 @@
+{
+  "packageId": "com.rbrfinance.app",
+  "host": "app.rbrfinance.com",
+  "name": "RBR Finance Manager",
+  "launcherName": "RBR Finance",
+  "display": "standalone",
+  "themeColor": "#0F172A",
+  "themeColorDark": "#0F172A",
+  "navigationColor": "#0F172A",
+  "navigationColorDark": "#0F172A",
+  "navigationDividerColor": "#00000000",
+  "navigationDividerColorDark": "#00000000",
+  "backgroundColor": "#0F172A",
+  "enableNotifications": false,
+  "startUrl": "/dashboard",
+  "iconUrl": "https://app.rbrfinance.com/icon-512.png",
+  "maskableIconUrl": "https://app.rbrfinance.com/icon-512.png",
+  "appVersionName": "1.0.0",
+  "appVersionCode": 1,
+  "signingKey": {
+    "path": "./android.keystore",
+    "alias": "rbrfinance"
+  },
+  "splashScreenFadeOutDuration": 300,
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "features": {
+    "locationDelegation": {
+      "enabled": false
+    },
+    "playBilling": {
+      "enabled": false
+    }
+  },
+  "alphaDependencies": {
+    "enabled": false
+  },
+  "permissions": [
+    "android.permission.RECORD_AUDIO",
+    "android.permission.MODIFY_AUDIO_SETTINGS"
+  ]
+}
