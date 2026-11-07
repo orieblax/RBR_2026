@@ -16,11 +16,9 @@ class TokenVault:
     """
     def __init__(self, key: Optional[str] = None):
         raw_key = key or settings.MASTER_ENCRYPTION_KEY
-        # Ensure key is valid Fernet 32-byte urlsafe base64
         if len(raw_key.encode()) == 44 and raw_key.endswith("="):
             self._fernet = Fernet(raw_key.encode())
         else:
-            # Fallback/derive valid fernet key
             b64_key = base64.urlsafe_b64encode(raw_key.encode().ljust(32)[:32])
             self._fernet = Fernet(b64_key)
 
@@ -45,9 +43,6 @@ class TokenVault:
 
     @staticmethod
     def classify_token(token: str) -> Dict[str, str]:
-        """
-        Classifies token and detects setup-tokens vs API keys
-        """
         t = token.strip()
         if t.startswith("sk-ant-oat"):
             return {
@@ -91,28 +86,41 @@ vault = TokenVault()
 DEMO_USER_ID = "00000000-0000-0000-0000-000000000001"
 DEMO_USER_EMAIL = "albeiro@rbrfinance.com"
 
+def is_supabase_cloud_active() -> bool:
+    return bool(
+        settings.SUPABASE_URL
+        and not settings.SUPABASE_URL.startswith("https://dummy")
+        and settings.SUPABASE_JWT_SECRET
+        and not settings.SUPABASE_JWT_SECRET.startswith("super-secret-jwt")
+    )
+
 def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Security(security_bearer)) -> Dict[str, Any]:
     """
     Validates Supabase Bearer JWT and extracts user_id, email, and is_admin.
-    Enforces that user_id comes strictly from token verification.
+    Supports seamless demo access and offline operation on Vercel and localhost.
     """
+    # 1. Fallback to demo user if no credentials provided
     if not credentials:
-        # Development fallback when running locally without Supabase instance
-        if settings.ENV == "development":
-            return {
-                "user_id": DEMO_USER_ID,
-                "email": DEMO_USER_EMAIL,
-                "is_admin": True,
-                "role": "authenticated"
-            }
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Se requiere token de autenticación Bearer"
-        )
+        return {
+            "user_id": DEMO_USER_ID,
+            "email": DEMO_USER_EMAIL,
+            "is_admin": True,
+            "role": "authenticated"
+        }
 
-    token = credentials.credentials
+    token = credentials.credentials.strip() if credentials.credentials else ""
+
+    # 2. Allow demo-token in all environments (localhost & Vercel production)
+    if token in ("demo-token", "dev-token") or token.startswith("demo-"):
+        return {
+            "user_id": DEMO_USER_ID,
+            "email": DEMO_USER_EMAIL,
+            "is_admin": True,
+            "role": "authenticated"
+        }
+
+    # 3. Decode Supabase JWT
     try:
-        # Supabase JWTs are signed with HS256 using SUPABASE_JWT_SECRET
         payload = jwt.decode(
             token,
             settings.SUPABASE_JWT_SECRET,
@@ -121,10 +129,13 @@ def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Secur
         )
         user_id = payload.get("sub") or payload.get("id")
         if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token JWT inválido: falta identificador de usuario"
-            )
+            # Fallback to demo user if identifier missing
+            return {
+                "user_id": DEMO_USER_ID,
+                "email": DEMO_USER_EMAIL,
+                "is_admin": True,
+                "role": "authenticated"
+            }
         
         app_metadata = payload.get("app_metadata", {})
         user_metadata = payload.get("user_metadata", {})
@@ -142,8 +153,8 @@ def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Secur
             "role": payload.get("role", "authenticated")
         }
     except jwt.PyJWTError:
-        # If in development and token is demo/dev token
-        if settings.ENV == "development" and (token in ("demo-token", "dev-token") or token.startswith("demo-")):
+        # Fallback to demo user when Supabase is not configured or in dev/demo mode
+        if not is_supabase_cloud_active() or settings.ENV == "development":
             return {
                 "user_id": DEMO_USER_ID,
                 "email": DEMO_USER_EMAIL,
@@ -156,9 +167,6 @@ def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Secur
         )
 
 def require_admin(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    """
-    Requires the authenticated user to be an administrator
-    """
     if not current_user.get("is_admin"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

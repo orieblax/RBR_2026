@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { authFetch } from '@/lib/api';
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -43,9 +44,8 @@ export default function RegisterPage() {
         // Trigger seed endpoint for new user
         if (data.user) {
           try {
-            await fetch('/api/py/seed', {
+            await authFetch('/api/py/seed', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ user_id: data.user.id }),
             });
           } catch (e) {

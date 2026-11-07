@@ -28,7 +28,7 @@ app.add_middleware(RateLimiterMiddleware, max_requests=120, window_seconds=60)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -90,7 +90,7 @@ def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_current_use
 
 @app.get("/api/py/finance/investment-capacity")
 def get_investment_capacity(
-    period: str = Query("month", regex="^(month|year)$"),
+    period: str = Query("month", pattern="^(month|year)$"),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     service = FinanceQueryService(current_user["user_id"])

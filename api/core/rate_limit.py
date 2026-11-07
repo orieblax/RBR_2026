@@ -21,7 +21,13 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
         if path.startswith("/api/py/docs") or path.startswith("/api/py/openapi.json") or path == "/api/py/health":
             return await call_next(request)
 
-        client_ip = request.client.host if request.client else "127.0.0.1"
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            client_ip = forwarded_for.split(",")[0].strip()
+        elif request.client:
+            client_ip = request.client.host
+        else:
+            client_ip = "127.0.0.1"
         now = time.time()
         window_start = now - self.window_seconds
 

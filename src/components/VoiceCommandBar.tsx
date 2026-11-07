@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { useVoiceRecognition } from '@/hooks/useVoiceRecognition';
+import { authFetch } from '@/lib/api';
 
 interface VoiceCommandBarProps {
   onStageAction: (action: any) => void;
@@ -19,13 +20,11 @@ export function VoiceCommandBar({ onStageAction, onRefreshData }: VoiceCommandBa
     setAgentReply(null);
 
     try {
-      const res = await fetch('/api/py/voice/command', {
+      const data = await authFetch('/api/py/voice/command', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: commandText.trim() }),
       });
 
-      const data = await res.json();
       if (data.type === 'stage_action') {
         onStageAction(data.staged_action);
       } else if (data.reply) {
@@ -34,9 +33,9 @@ export function VoiceCommandBar({ onStageAction, onRefreshData }: VoiceCommandBa
           onRefreshData();
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error executing voice command:', err);
-      setAgentReply('Error de comunicación con el asistente de voz.');
+      setAgentReply(err.message || 'Error de comunicación con el asistente de voz.');
     } finally {
       setIsProcessing(false);
       setInputText('');

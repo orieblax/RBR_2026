@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { formatCOP } from './KPICards';
+import { authFetch } from '@/lib/api';
 
 interface ConfirmationModalProps {
   stagedAction: any | null;
@@ -26,14 +27,11 @@ export function ConfirmationModal({
   const handleConfirm = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/py/voice/confirm', {
+      await authFetch('/api/py/voice/confirm', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action_id }),
       });
-      if (res.ok) {
-        onConfirmed();
-      }
+      onConfirmed();
     } catch (err) {
       console.error('Error confirming voice action:', err);
     } finally {
@@ -43,9 +41,8 @@ export function ConfirmationModal({
 
   const handleCancel = async () => {
     try {
-      await fetch('/api/py/voice/cancel', {
+      await authFetch('/api/py/voice/cancel', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action_id }),
       });
     } catch (err) {

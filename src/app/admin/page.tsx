@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Navbar } from '@/components/Navbar';
+import { authFetch } from '@/lib/api';
 
 interface AdminUser {
   id: string;
@@ -34,17 +35,13 @@ export default function AdminPage() {
 
   const fetchData = async () => {
     try {
-      const [uRes, dRes] = await Promise.all([
-        fetch('/api/py/admin/users'),
-        fetch('/api/py/admin/diagnostics'),
+      const [uData, dData] = await Promise.all([
+        authFetch('/api/py/admin/users'),
+        authFetch('/api/py/admin/diagnostics'),
       ]);
-      if (uRes.ok && dRes.ok) {
-        const uData = await uRes.json();
-        const dData = await dRes.json();
-        setUsers(uData);
-        setDiagnostics(dData);
-        setSelectedDefaultModel(dData.system?.default_ai_model || 'claude-3-7-sonnet-latest');
-      }
+      setUsers(uData);
+      setDiagnostics(dData);
+      setSelectedDefaultModel(dData.system?.default_ai_model || 'claude-3-7-sonnet-latest');
     } catch (err) {
       console.error('Error fetching admin data:', err);
     } finally {
@@ -58,41 +55,37 @@ export default function AdminPage() {
 
   const handleToggleRole = async (userId: string) => {
     try {
-      const res = await fetch(`/api/py/admin/users/${userId}/toggle-role`, { method: 'POST' });
-      if (res.ok) {
-        setMsg('Rol actualizado exitosamente');
-        fetchData();
-      }
-    } catch (e) {
+      await authFetch(`/api/py/admin/users/${userId}/toggle-role`, { method: 'POST' });
+      setMsg('Rol actualizado exitosamente');
+      fetchData();
+    } catch (e: any) {
       console.error(e);
+      setMsg(`Error: ${e.message || 'No fue posible actualizar rol'}`);
     }
   };
 
   const handleToggleStatus = async (userId: string) => {
     try {
-      const res = await fetch(`/api/py/admin/users/${userId}/toggle-status`, { method: 'POST' });
-      if (res.ok) {
-        setMsg('Estado de usuario actualizado exitosamente');
-        fetchData();
-      }
-    } catch (e) {
+      await authFetch(`/api/py/admin/users/${userId}/toggle-status`, { method: 'POST' });
+      setMsg('Estado de usuario actualizado exitosamente');
+      fetchData();
+    } catch (e: any) {
       console.error(e);
+      setMsg(`Error: ${e.message || 'No fue posible actualizar estado'}`);
     }
   };
 
   const handleUpdateModel = async () => {
     try {
-      const res = await fetch('/api/py/admin/default-model', {
+      await authFetch('/api/py/admin/default-model', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: selectedDefaultModel }),
       });
-      if (res.ok) {
-        setMsg(`Modelo predeterminado actualizado a ${selectedDefaultModel}`);
-        fetchData();
-      }
-    } catch (e) {
+      setMsg(`Modelo predeterminado actualizado a ${selectedDefaultModel}`);
+      fetchData();
+    } catch (e: any) {
       console.error(e);
+      setMsg(`Error: ${e.message || 'No fue posible actualizar modelo'}`);
     }
   };
 
@@ -138,7 +131,7 @@ export default function AdminPage() {
                 <div className="text-muted small mb-1">Estado de Supabase</div>
                 <div className="d-flex align-items-center gap-2">
                   <span className={`badge ${diagnostics.system.supabase_connected ? 'bg-success' : 'bg-info text-dark'}`}>
-                    {diagnostics.system.supabase_connected ? 'Conectado (PostgreSQL)' : 'Modo Local / Dev'}
+                    {diagnostics.system.supabase_connected ? 'Conectado (PostgreSQL)' : 'Modo Local / Demo'}
                   </span>
                 </div>
               </div>
@@ -171,26 +164,38 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* Default Model Selector */}
+        {/* Default Model Selector - Open Text Input with Datalist Suggestions */}
         <div className="card shadow-sm border-0 rounded-4 p-4 bg-white mb-4">
-          <h5 className="fw-bold text-dark mb-3">
+          <h5 className="fw-bold text-dark mb-1">
             <i className="bi bi-cpu-fill text-primary me-2"></i>
-            Modelo Predeterminado para Nuevos Usuarios y Agente
+            Modelo Predeterminado Global (Campo Abierto)
           </h5>
+          <p className="text-muted small mb-3">
+            Puedes escribir libremente cualquier modelo disponible en tus proveedores de IA (Claude, OpenAI, Groq, etc.).
+          </p>
           <div className="row g-3 align-items-center">
             <div className="col-12 col-md-8">
-              <select
-                className="form-select bg-light"
+              <input
+                type="text"
+                list="admin-model-list"
+                className="form-control bg-light"
+                placeholder="Escribe el modelo (ej. claude-3-7-sonnet-latest, gpt-4o, llama-3.3-70b-versatile)"
                 value={selectedDefaultModel}
                 onChange={(e) => setSelectedDefaultModel(e.target.value)}
-              >
-                <option value="claude-3-7-sonnet-latest">claude-3-7-sonnet-latest (Recomendado)</option>
-                <option value="claude-3-5-sonnet-20241022">claude-3-5-sonnet-20241022</option>
-                <option value="claude-3-haiku-20240307">claude-3-haiku-20240307</option>
-                <option value="gpt-4o">gpt-4o</option>
-                <option value="gpt-4o-mini">gpt-4o-mini</option>
-                <option value="llama-3.1-8b-instant">llama-3.1-8b-instant (Groq)</option>
-              </select>
+              />
+              <datalist id="admin-model-list">
+                <option value="claude-3-7-sonnet-latest" />
+                <option value="claude-3-5-sonnet-20241022" />
+                <option value="claude-3-5-haiku-20241022" />
+                <option value="claude-3-haiku-20240307" />
+                <option value="gpt-4o" />
+                <option value="gpt-4o-mini" />
+                <option value="gpt-4.5-preview" />
+                <option value="o3-mini" />
+                <option value="llama-3.1-8b-instant" />
+                <option value="llama-3.3-70b-versatile" />
+                <option value="deepseek-r1-distill-llama-70b" />
+              </datalist>
             </div>
             <div className="col-12 col-md-4">
               <button

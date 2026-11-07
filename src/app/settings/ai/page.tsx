@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Navbar } from '@/components/Navbar';
+import { authFetch } from '@/lib/api';
 
 export default function AISettingsPage() {
   const [provider, setProvider] = useState('anthropic');
@@ -17,8 +18,7 @@ export default function AISettingsPage() {
   const [testResult, setTestResult] = useState<{ success: boolean; latency?: number; message?: string } | null>(null);
 
   useEffect(() => {
-    fetch('/api/py/settings/ai')
-      .then((res) => res.json())
+    authFetch('/api/py/settings/ai')
       .then((data) => {
         if (data.has_credential) {
           setProvider(data.provider || 'anthropic');
@@ -33,12 +33,12 @@ export default function AISettingsPage() {
 
   const handleProviderChange = (newProvider: string) => {
     setProvider(newProvider);
-    if (newProvider === 'anthropic') {
+    if (newProvider === 'anthropic' && !preferredModel) {
       setPreferredModel('claude-3-7-sonnet-latest');
-    } else if (newProvider === 'openai') {
+    } else if (newProvider === 'openai' && !preferredModel) {
       setPreferredModel('gpt-4o');
       setAuthMode('api_key');
-    } else if (newProvider === 'groq') {
+    } else if (newProvider === 'groq' && !preferredModel) {
       setPreferredModel('llama-3.1-8b-instant');
       setAuthMode('api_key');
     }
@@ -52,9 +52,8 @@ export default function AISettingsPage() {
     setStatusMessage(null);
 
     try {
-      const res = await fetch('/api/py/settings/ai', {
+      const data = await authFetch('/api/py/settings/ai', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           provider,
           token: token.trim(),
@@ -62,17 +61,12 @@ export default function AISettingsPage() {
         }),
       });
 
-      const data = await res.json();
-      if (res.ok) {
-        setMaskedToken(data.masked_token);
-        setAuthMode(data.auth_mode);
-        setToken('');
-        setStatusMessage({ type: 'success', text: data.message || 'Token guardado y cifrado con éxito.' });
-      } else {
-        setStatusMessage({ type: 'danger', text: data.detail || 'Error al guardar credencial.' });
-      }
+      setMaskedToken(data.masked_token);
+      setAuthMode(data.auth_mode);
+      setToken('');
+      setStatusMessage({ type: 'success', text: data.message || 'Token guardado y cifrado con éxito.' });
     } catch (err: any) {
-      setStatusMessage({ type: 'danger', text: err.message || 'Error de red.' });
+      setStatusMessage({ type: 'danger', text: err.message || 'Error al guardar credencial.' });
     } finally {
       setSaving(false);
     }
@@ -83,9 +77,8 @@ export default function AISettingsPage() {
     setTestResult(null);
 
     try {
-      const res = await fetch('/api/py/settings/ai/test', {
+      const data = await authFetch('/api/py/settings/ai/test', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           provider,
           token: token.trim() || undefined,
@@ -93,7 +86,6 @@ export default function AISettingsPage() {
         }),
       });
 
-      const data = await res.json();
       if (data.status === 'success') {
         setTestResult({
           success: true,
@@ -188,34 +180,41 @@ export default function AISettingsPage() {
                   </div>
                 </div>
 
-                {/* Model Selector */}
+                {/* Open Field: Modelo Preferido (Free Write with Datalist Suggestions) */}
                 <div className="mb-4">
-                  <label className="form-label text-dark fw-bold small text-uppercase">Modelo Preferido</label>
-                  <select
-                    className="form-select bg-light"
-                    value={preferredModel}
-                    onChange={(e) => setPreferredModel(e.target.value)}
-                  >
-                    {provider === 'anthropic' && (
-                      <>
-                        <option value="claude-3-7-sonnet-latest">claude-3-7-sonnet-latest (Recomendado)</option>
-                        <option value="claude-3-5-sonnet-20241022">claude-3-5-sonnet-20241022</option>
-                        <option value="claude-3-haiku-20240307">claude-3-haiku-20240307 (Rápido)</option>
-                      </>
-                    )}
-                    {provider === 'openai' && (
-                      <>
-                        <option value="gpt-4o">gpt-4o</option>
-                        <option value="gpt-4o-mini">gpt-4o-mini</option>
-                      </>
-                    )}
-                    {provider === 'groq' && (
-                      <>
-                        <option value="llama-3.1-8b-instant">llama-3.1-8b-instant</option>
-                        <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile</option>
-                      </>
-                    )}
-                  </select>
+                  <label className="form-label text-dark fw-bold small text-uppercase d-flex justify-content-between align-items-center">
+                    <span>Modelo Preferido</span>
+                    <span className="badge bg-light text-dark border fw-normal">Campo de texto libre</span>
+                  </label>
+                  <div className="input-group">
+                    <span className="input-group-text bg-light"><i className="bi bi-cpu text-muted"></i></span>
+                    <input
+                      type="text"
+                      list="ai-models-list"
+                      className="form-control bg-light"
+                      placeholder="Escribe el modelo deseado (ej. claude-3-7-sonnet-latest, gpt-4o, llama-3.3-70b-versatile, etc.)"
+                      value={preferredModel}
+                      onChange={(e) => setPreferredModel(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <datalist id="ai-models-list">
+                    <option value="claude-3-7-sonnet-latest">claude-3-7-sonnet-latest (Anthropic Sonnet 3.7)</option>
+                    <option value="claude-3-5-sonnet-20241022">claude-3-5-sonnet-20241022 (Anthropic Sonnet 3.5)</option>
+                    <option value="claude-3-5-haiku-20241022">claude-3-5-haiku-20241022 (Anthropic Haiku 3.5)</option>
+                    <option value="claude-3-haiku-20240307">claude-3-haiku-20240307 (Anthropic Haiku 3)</option>
+                    <option value="gpt-4o">gpt-4o (OpenAI Omni)</option>
+                    <option value="gpt-4o-mini">gpt-4o-mini (OpenAI Fast)</option>
+                    <option value="gpt-4.5-preview">gpt-4.5-preview (OpenAI Research)</option>
+                    <option value="o3-mini">o3-mini (OpenAI Reasoning)</option>
+                    <option value="llama-3.1-8b-instant">llama-3.1-8b-instant (Groq)</option>
+                    <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile (Groq)</option>
+                    <option value="deepseek-r1-distill-llama-70b">deepseek-r1-distill-llama-70b (Groq)</option>
+                    <option value="mixtral-8x7b-32768">mixtral-8x7b-32768 (Groq)</option>
+                  </datalist>
+                  <div className="form-text small">
+                    Puedes escribir libremente cualquier identificador de modelo válido de tu proveedor (o seleccionar una sugerencia).
+                  </div>
                 </div>
 
                 {/* Stored Token Preview */}
@@ -261,7 +260,7 @@ export default function AISettingsPage() {
                   <div className="form-text">
                     {provider === 'anthropic'
                       ? 'Admite tokens de claude setup-token (sk-ant-oat01-*) con cabecera OAuth beta o API Keys normales.'
-                      : 'El token se cifra antes de almacenarse en la base de datos y nunca se expone en texto plano.'}
+                      : 'El token se cifra con AES-256 antes de almacenarse y nunca se expone en texto plano.'}
                   </div>
                 </div>
 
