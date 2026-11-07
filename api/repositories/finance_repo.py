@@ -193,3 +193,125 @@ class FinanceRepository:
             "new_balance": target_balance,
             "item": target_item
         }
+
+    def collect_receivable(
+        self,
+        identifier: str,
+        is_collected: bool = True,
+        dest_account: Optional[str] = None
+    ) -> Dict[str, Any]:
+        from api.domain.calculator import FinancialCalculator
+        dataset = self._local_store[self.user_id]
+        fiducia_cap = 32560000.0
+        for inv in dataset.get("investment_assets", []):
+            if inv.get("asset_type") == "fiducia":
+                fiducia_cap = float(inv.get("base_amount", 32560000.0))
+        fiducia_yield = FinancialCalculator.calculate_fiducia_monthly_yield(fiducia_cap)
+        sum_extras = sum(FinancialCalculator.calculate_monthly_extra_value(e) for e in dataset.get("monthly_extras", []))
+
+        target_rec = None
+        for rec in dataset.get("receivables", []):
+            if rec.get("id") == identifier or rec.get("name", "").lower() == identifier.lower() or identifier.lower() in rec.get("name", "").lower():
+                target_rec = rec
+                break
+
+        if not target_rec:
+            return {"status": "error", "message": f"Cuenta por cobrar {identifier} no encontrada"}
+
+        # Calculate value while active/pending
+        was_pending = target_rec.get("is_pending", True)
+        target_rec["is_pending"] = True
+        amount = FinancialCalculator.calculate_receivable_value(target_rec, fiducia_yield, sum_extras)
+        target_rec["is_pending"] = not is_collected
+
+        adj_res = None
+        if is_collected and dest_account and amount > 0:
+            adj_res = self.add_adjustment("liquid_account", dest_account, amount, f"Cobro {target_rec['name']}")
+
+        return {
+            "status": "success",
+            "receivable": target_rec,
+            "was_pending": was_pending,
+            "collected_amount": amount,
+            "dest_account": adj_res["target_name"] if adj_res else None
+        }
+
+    def pay_expense_from_account(
+        self,
+        expense_identifier: str,
+        source_account: str
+    ) -> Dict[str, Any]:
+        dataset = self._local_store[self.user_id]
+        target_exp = None
+        for exp in dataset.get("recurring_expenses", []):
+            if exp.get("id") == expense_identifier or exp.get("name", "").lower() == expense_identifier.lower() or expense_identifier.lower() in exp.get("name", "").lower():
+                target_exp = exp
+                break
+
+        if not target_exp:
+            return {"status": "error", "message": f"Gasto {expense_identifier} no encontrado"}
+
+        amount = float(target_exp.get("pending_base") or target_exp.get("recurrent_base", 0.0))
+        target_exp["is_pending"] = False
+
+        adj_res = self.add_adjustment("liquid_account", source_account, -abs(amount), f"Pago {target_exp['name']}")
+        return {
+            "status": "success",
+            "expense": target_exp,
+            "paid_amount": amount,
+            "source_account": adj_res["target_name"]
+        }
+
+    def transfer_between_accounts(
+        self,
+        from_account: str,
+        to_account: str,
+        amount: float,
+        note: str = ""
+    ) -> Dict[str, Any]:
+        transfer_val = abs(float(amount))
+        out_res = self.add_adjustment(
+            "liquid_account",
+            from_account,
+            -transfer_val,
+            note or f"Transferencia a {to_account}"
+        )
+        in_res = self.add_adjustment(
+            "liquid_account",
+            to_account,
+            transfer_val,
+            note or f"Transferencia desde {out_res['target_name']}"
+        )
+        return {
+            "status": "success",
+            "from_account": out_res["target_name"],
+            "to_account": in_res["target_name"],
+            "amount": transfer_val
+        }
+
+    def pop_last_adjustment(self, account_identifier: Optional[str] = None) -> Dict[str, Any]:
+        dataset = self._local_store[self.user_id]
+        accounts = dataset.get("liquid_accounts", [])
+
+        target_acc = None
+        if account_identifier:
+            for acc in accounts:
+                if acc.get("name", "").lower() == account_identifier.lower() or account_identifier.lower() in acc.get("name", "").lower():
+                    target_acc = acc
+                    break
+
+        if target_acc:
+            adjs = target_acc.get("adjustments", [])
+            if adjs:
+                removed = adjs.pop()
+                return {"status": "success", "account_name": target_acc["name"], "removed_adjustment": removed}
+            return {"status": "error", "message": f"No hay movimientos para deshacer en {target_acc['name']}"}
+
+        # Fallback: find first account with adjustments
+        for acc in accounts:
+            adjs = acc.get("adjustments", [])
+            if adjs:
+                removed = adjs.pop()
+                return {"status": "success", "account_name": acc["name"], "removed_adjustment": removed}
+
+        return {"status": "error", "message": "No se encontraron movimientos recientes para deshacer"}

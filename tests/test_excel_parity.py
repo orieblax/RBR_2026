@@ -230,3 +230,114 @@ def test_use_case_4_fuzzy_invoice_and_disambiguation():
     confirm_res = agent.confirm_action(staged_amb["action_id"], selected_candidate=chosen_candidate)
     assert confirm_res["status"] == "success"
 
+def test_use_case_5_collect_receivable_with_deposit():
+    user_id = "test-case-5-user"
+    agent = FinanceAgent(user_id)
+
+    res = agent.process_voice_command("Ana ya pagó el arriendo en Caja Social")
+    assert res["type"] == "stage_action"
+    staged = res["staged_action"]
+    assert staged["tool_name"] == "propose_collect_receivable"
+    assert staged["target_item"]["name"] == "Ana 26"
+    assert staged["target_item"]["after_status"] == "Cobrado"
+    assert staged["target_item"]["secondary_item"]["name"] == "Caja social"
+    assert staged["target_item"]["secondary_item"]["delta"] == 700000.0
+    # Restante goes up by +700,000, Incl Pend stays unchanged ($0 delta) because Pend goes down -700,000
+    assert staged["impact_delta"]["delta_restante"] == 700000.0
+    assert staged["impact_delta"]["delta_incl_pend"] == 0.0
+
+    agent.confirm_action(staged["action_id"])
+    summary = agent.query_service.get_dashboard_summary()
+    caja = next(a for a in summary["liquid_accounts"] if a["name"] == "Caja social")
+    assert caja["calculated_total"] == 987948.0 + 700000.0
+
+def test_use_case_6_pay_expense_from_account():
+    user_id = "test-case-6-user"
+    agent = FinanceAgent(user_id)
+
+    res = agent.process_voice_command("Pagué el recibo de Gas desde mi bolsillo")
+    assert res["type"] == "stage_action"
+    staged = res["staged_action"]
+    assert staged["tool_name"] == "propose_pay_expense_from_account"
+    assert staged["target_item"]["name"] == "Gas 15"
+    assert staged["target_item"]["after_status"] == "Pagado"
+    assert staged["target_item"]["secondary_item"]["name"] == "Bolsillo"
+    assert staged["target_item"]["secondary_item"]["after_value"] == 195000.0
+
+    agent.confirm_action(staged["action_id"])
+    summary = agent.query_service.get_dashboard_summary()
+    bolsillo = next(a for a in summary["liquid_accounts"] if a["name"] == "Bolsillo")
+    assert bolsillo["calculated_total"] == 195000.0
+    gas = next(e for e in summary["recurring_expenses"] if e["name"] == "Gas 15")
+    assert gas["is_paid"] is True
+
+def test_use_case_7_transfer_between_accounts():
+    user_id = "test-case-7-user"
+    agent = FinanceAgent(user_id)
+
+    res = agent.process_voice_command("Transferí 100 000 de Caja Social a Nequi")
+    assert res["type"] == "stage_action"
+    staged = res["staged_action"]
+    assert staged["tool_name"] == "propose_transfer_between_accounts"
+    assert staged["target_item"]["name"] == "Caja social"
+    assert staged["target_item"]["delta"] == -100000.0
+    assert staged["target_item"]["secondary_item"]["name"] == "Nequi"
+    assert staged["target_item"]["secondary_item"]["delta"] == 100000.0
+    assert staged["impact_delta"]["delta_restante"] == 0.0
+
+    agent.confirm_action(staged["action_id"])
+    summary = agent.query_service.get_dashboard_summary()
+    caja = next(a for a in summary["liquid_accounts"] if a["name"] == "Caja social")
+    nequi = next(a for a in summary["liquid_accounts"] if a["name"] == "Nequi")
+    assert caja["calculated_total"] == 887948.0
+    assert nequi["calculated_total"] == 200675.0
+
+def test_use_case_8_financial_goals_allocation_and_query():
+    user_id = "test-case-8-user"
+    agent = FinanceAgent(user_id)
+
+    # 1. Allocate to Maestría
+    res = agent.process_voice_command("Abonar 300 000 a la meta de Maestría")
+    assert res["type"] == "stage_action"
+    staged = res["staged_action"]
+    assert staged["tool_name"] == "propose_allocate_goal"
+    assert staged["target_item"]["name"] == "Maestría"
+    assert staged["target_item"]["before_value"] == 3500000.0
+    assert staged["target_item"]["after_value"] == 3800000.0
+    agent.confirm_action(staged["action_id"])
+
+    # 2. Query specific goal
+    q_res = agent.process_voice_command("¿Cuánto me falta para la meta de Visa?")
+    assert q_res["type"] == "read"
+    assert "Visa" in q_res["reply"]
+    assert "1,200,000" in q_res["reply"]
+
+def test_use_case_9_undo_last_adjustment_and_pending_queries():
+    user_id = "test-case-9-user"
+    agent = FinanceAgent(user_id)
+
+    # 1. Query pending bills
+    q_bills = agent.process_voice_command("¿Qué facturas tengo pendientes?")
+    assert q_bills["type"] == "read"
+    assert "345,000" in q_bills["reply"]
+    assert "Gas 15" in q_bills["reply"]
+
+    # 2. Query pending receivables
+    q_recs = agent.process_voice_command("¿Quién falta por pagar arriendo?")
+    assert q_recs["type"] == "read"
+    assert "Ana 26" in q_recs["reply"]
+
+    # 3. Undo last adjustment in Daviplata (last seed adjustment is -3600 Comisión)
+    undo_res = agent.process_voice_command("Borrar el último movimiento de Daviplata")
+    assert undo_res["type"] == "stage_action"
+    staged = undo_res["staged_action"]
+    assert staged["tool_name"] == "propose_undo_last_adjustment"
+    assert staged["target_item"]["name"] == "Daviplata"
+    assert staged["target_item"]["delta"] == 3600.0
+    agent.confirm_action(staged["action_id"])
+
+    summary = agent.query_service.get_dashboard_summary()
+    davi = next(a for a in summary["liquid_accounts"] if a["name"] == "Daviplata")
+    assert davi["calculated_total"] == 2893.0 + 3600.0
+
+

@@ -1,7 +1,7 @@
 import uuid
 import re
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 from api.queries.finance_queries import FinanceQueryService
 from api.commands.finance_commands import FinanceCommandService
@@ -43,20 +43,49 @@ WORD_NUMBERS = {
     "medio millon": 500000.0,
 }
 
-ACCOUNTS_MAP = {
-    "bolsillo": "Bolsillo",
+LIQUID_ACCOUNTS_MAP = {
     "mi bolsillo": "Bolsillo",
+    "bolsillo": "Bolsillo",
     "daviplata": "Daviplata",
     "caja social": "Caja social",
     "cajasocial": "Caja social",
     "nequi": "Nequi",
+}
+
+RECEIVABLES_MAP = {
     "camila 20": "Camila 20",
     "camila": "Camila 20",
+    "apto 01": "Camila 20",
     "ana 26": "Ana 26",
     "ana": "Ana 26",
+    "casa 3p": "Ana 26",
     "marisol 23": "Marisol 23",
     "marisol": "Marisol 23",
+    "casa 2p": "Marisol 23",
+    "angelica 1": "Angelica 1",
+    "angelica": "Angelica 1",
+    "apto 03": "Angelica 1",
+    "odeth 28": "Odeth 28",
+    "odeth": "Odeth 28",
+    "apto 02": "Odeth 28",
     "fiducia": "Fiducia",
+    "pagos extras": "Pagos Extras",
+}
+
+ACCOUNTS_MAP = {**LIQUID_ACCOUNTS_MAP, **RECEIVABLES_MAP}
+
+GOALS_MAP = {
+    "english": "English",
+    "ingles": "English",
+    "maestria": "Maestría",
+    "posgrado": "Maestría",
+    "visa": "Visa",
+    "casa brisas": "Casa brisas",
+    "brisas": "Casa brisas",
+    "matrimonio": "Matrimonio",
+    "boda": "Matrimonio",
+    "ortodoncia": "Ortodoncia",
+    "odontologia": "Ortodoncia",
 }
 
 EXPENSE_ALIASES = {
@@ -147,6 +176,53 @@ def _identify_account(text: str) -> Optional[str]:
             return name
     return None
 
+def _identify_liquid_account(text: str) -> Optional[str]:
+    clean = _strip_accents(text).lower()
+    for key, name in sorted(LIQUID_ACCOUNTS_MAP.items(), key=lambda x: -len(x[0])):
+        if re.search(rf"\b{key}\b", clean):
+            return name
+    return None
+
+def _identify_receivable(text: str) -> Optional[str]:
+    clean = _strip_accents(text).lower()
+    for key, name in sorted(RECEIVABLES_MAP.items(), key=lambda x: -len(x[0])):
+        if re.search(rf"\b{key}\b", clean):
+            return name
+    return None
+
+def _identify_goal(text: str) -> Optional[str]:
+    clean = _strip_accents(text).lower()
+    for key, name in sorted(GOALS_MAP.items(), key=lambda x: -len(x[0])):
+        if re.search(rf"\b{key}\b", clean):
+            return name
+    return None
+
+def _identify_expense(clean_text: str, expenses: List[Dict[str, Any]]) -> Optional[str]:
+    for alias, official_name in EXPENSE_ALIASES.items():
+        if re.search(rf"\b{alias}\b", clean_text):
+            return official_name
+    for exp in expenses:
+        exp_clean = _strip_accents(exp["name"]).lower()
+        base_name = re.sub(r"\s+\d+(?:-\d+)?$", "", exp_clean)
+        if re.search(rf"\b{re.escape(base_name)}\b", clean_text):
+            return exp["name"]
+    return None
+
+def _identify_transfer_accounts(text: str) -> Optional[Tuple[str, str]]:
+    clean = _strip_accents(text).lower()
+    # Pattern: de/desde <acc1> ... a/para/hacia <acc2>
+    acc_keys = "|".join(sorted(LIQUID_ACCOUNTS_MAP.keys(), key=len, reverse=True))
+    m = re.search(
+        rf"\b(?:de|desde)\s+(?:mi\s+)?({acc_keys})\b.*?\b(?:a|para|hacia|en)\s+(?:mi\s+)?({acc_keys})\b",
+        clean
+    )
+    if m:
+        from_acc = LIQUID_ACCOUNTS_MAP[m.group(1)]
+        to_acc = LIQUID_ACCOUNTS_MAP[m.group(2)]
+        if from_acc != to_acc:
+            return (from_acc, to_acc)
+    return None
+
 def _extract_reason(text: str, account_name: Optional[str] = None) -> str:
     clean = _strip_accents(text).lower()
 
@@ -159,7 +235,6 @@ def _extract_reason(text: str, account_name: Optional[str] = None) -> str:
     clean = re.sub(r"\b\d+\b", " ", clean)
 
     # 3. Look for explicit reason prepositions: "por <motivo>", "en <motivo>", "para <motivo>"
-    # Prefer "por" first because "por" in Spanish always introduces the motive ("por mercado", "por transporte")
     por_match = re.search(r"\bpor\s+([a-zñ\s]+?)(?:\s+(?:desde|con|a|para|en)|$)", clean)
     if por_match:
         cand = por_match.group(1).strip()
@@ -204,10 +279,10 @@ class FinanceAgent:
         return self.query_service.search_financial_history(query)
 
     # --- Write Proposal Tools (Staged Execution) ---
-    def propose_ledger_adjustment(self, target_name: str, amount_delta: float, reason: str = "") -> Dict[str, Any]:
+    def propose_ledger_adjustment(self, target_name: str, amount_delta: float, reason: str = "", parent_type: str = "liquid_account") -> Dict[str, Any]:
         action_id = str(uuid.uuid4())
         payload = {
-            "parent_type": "liquid_account",
+            "parent_type": parent_type,
             "target_name": target_name,
             "amount": float(amount_delta),
             "note": reason or "Ajuste propuesto por voz"
@@ -291,6 +366,149 @@ class FinanceAgent:
         pending_voice_actions_store[action_id] = action
         return action
 
+    def propose_collect_receivable(
+        self,
+        item_name: str,
+        is_collected: bool = True,
+        dest_account: Optional[str] = None,
+        candidates: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        action_id = str(uuid.uuid4())
+        payload = {
+            "item_name": item_name,
+            "is_collected": is_collected,
+            "dest_account": dest_account
+        }
+        preview = self.command_service.preview_mutation("collect_receivable", payload)
+        dest_str = f" y depositar en {dest_account}" if dest_account else ""
+        preview_summary = f"Marcar como cobrado {item_name}{dest_str}"
+
+        action = {
+            "action_id": action_id,
+            "user_id": self.user_id,
+            "tool_name": "propose_collect_receivable",
+            "action_payload": payload,
+            "preview_summary": preview_summary,
+            "target_item": preview.get("target_item"),
+            "candidates": candidates or preview.get("candidates", []),
+            "impact_delta": preview["impact_delta"],
+            "kpis_before": preview["kpis_before"],
+            "kpis_after": preview["kpis_after"],
+            "status": "pending",
+            "created_at": datetime.utcnow().isoformat()
+        }
+        pending_voice_actions_store[action_id] = action
+        return action
+
+    def propose_pay_expense_from_account(self, item_name: str, source_account: str) -> Dict[str, Any]:
+        action_id = str(uuid.uuid4())
+        payload = {
+            "item_name": item_name,
+            "source_account": source_account
+        }
+        preview = self.command_service.preview_mutation("pay_expense_from_account", payload)
+        cost = abs(preview.get("target_item", {}).get("delta", 0.0))
+        preview_summary = f"Pagar {item_name} (${cost:,.0f} COP) descontando de {source_account}"
+
+        action = {
+            "action_id": action_id,
+            "user_id": self.user_id,
+            "tool_name": "propose_pay_expense_from_account",
+            "action_payload": payload,
+            "preview_summary": preview_summary,
+            "target_item": preview.get("target_item"),
+            "candidates": [],
+            "impact_delta": preview["impact_delta"],
+            "kpis_before": preview["kpis_before"],
+            "kpis_after": preview["kpis_after"],
+            "status": "pending",
+            "created_at": datetime.utcnow().isoformat()
+        }
+        pending_voice_actions_store[action_id] = action
+        return action
+
+    def propose_transfer_between_accounts(self, from_account: str, to_account: str, amount: float, note: str = "") -> Dict[str, Any]:
+        action_id = str(uuid.uuid4())
+        payload = {
+            "from_account": from_account,
+            "to_account": to_account,
+            "amount": abs(float(amount)),
+            "note": note
+        }
+        preview = self.command_service.preview_mutation("transfer_between_accounts", payload)
+        preview_summary = f"Transferir ${abs(amount):,.0f} COP de {from_account} a {to_account}"
+
+        action = {
+            "action_id": action_id,
+            "user_id": self.user_id,
+            "tool_name": "propose_transfer_between_accounts",
+            "action_payload": payload,
+            "preview_summary": preview_summary,
+            "target_item": preview.get("target_item"),
+            "candidates": [],
+            "impact_delta": preview["impact_delta"],
+            "kpis_before": preview["kpis_before"],
+            "kpis_after": preview["kpis_after"],
+            "status": "pending",
+            "created_at": datetime.utcnow().isoformat()
+        }
+        pending_voice_actions_store[action_id] = action
+        return action
+
+    def propose_allocate_goal(self, goal_name: str, amount: float) -> Dict[str, Any]:
+        action_id = str(uuid.uuid4())
+        payload = {
+            "goal_name": goal_name,
+            "amount": float(amount)
+        }
+        preview = self.command_service.preview_mutation("allocate_goal", payload)
+        preview_summary = f"Abonar ${amount:,.0f} COP a la meta financiera {goal_name}"
+
+        action = {
+            "action_id": action_id,
+            "user_id": self.user_id,
+            "tool_name": "propose_allocate_goal",
+            "action_payload": payload,
+            "preview_summary": preview_summary,
+            "target_item": preview.get("target_item"),
+            "candidates": [],
+            "impact_delta": preview["impact_delta"],
+            "kpis_before": preview["kpis_before"],
+            "kpis_after": preview["kpis_after"],
+            "status": "pending",
+            "created_at": datetime.utcnow().isoformat()
+        }
+        pending_voice_actions_store[action_id] = action
+        return action
+
+    def propose_undo_last_adjustment(self, account_name: Optional[str] = None) -> Dict[str, Any]:
+        action_id = str(uuid.uuid4())
+        payload = {
+            "account_name": account_name
+        }
+        preview = self.command_service.preview_mutation("undo_last_adjustment", payload)
+        target_item = preview.get("target_item") or {}
+        acc_label = target_item.get("name", account_name or "cuenta")
+        note_label = target_item.get("note", "último ajuste")
+        preview_summary = f"Deshacer último movimiento en {acc_label} ({note_label})"
+
+        action = {
+            "action_id": action_id,
+            "user_id": self.user_id,
+            "tool_name": "propose_undo_last_adjustment",
+            "action_payload": payload,
+            "preview_summary": preview_summary,
+            "target_item": target_item,
+            "candidates": [],
+            "impact_delta": preview["impact_delta"],
+            "kpis_before": preview["kpis_before"],
+            "kpis_after": preview["kpis_after"],
+            "status": "pending",
+            "created_at": datetime.utcnow().isoformat()
+        }
+        pending_voice_actions_store[action_id] = action
+        return action
+
     def propose_update_item(self, category: str, name: str, new_amount: float) -> Dict[str, Any]:
         action_id = str(uuid.uuid4())
         payload = {
@@ -334,6 +552,9 @@ class FinanceAgent:
             if tool == "propose_toggle_pending_status":
                 payload["item_name"] = selected_candidate["item_name"]
                 action["preview_summary"] = f"Marcar como pagado (*0) el gasto {payload['item_name']}"
+            elif tool == "propose_collect_receivable":
+                payload["item_name"] = selected_candidate["item_name"]
+                action["preview_summary"] = f"Marcar como cobrado {payload['item_name']}"
 
         exec_result = {}
         if tool == "propose_ledger_adjustment":
@@ -347,6 +568,26 @@ class FinanceAgent:
         elif tool == "propose_toggle_pending_status":
             exec_result = cmd_svc.execute_toggle_pending(
                 payload["category"], payload["item_name"], payload["is_paid"]
+            )
+        elif tool == "propose_collect_receivable":
+            exec_result = cmd_svc.execute_collect_receivable(
+                payload["item_name"], payload.get("is_collected", True), payload.get("dest_account")
+            )
+        elif tool == "propose_pay_expense_from_account":
+            exec_result = cmd_svc.execute_pay_expense_from_account(
+                payload["item_name"], payload["source_account"]
+            )
+        elif tool == "propose_transfer_between_accounts":
+            exec_result = cmd_svc.execute_transfer_between_accounts(
+                payload["from_account"], payload["to_account"], payload["amount"], payload.get("note", "")
+            )
+        elif tool == "propose_allocate_goal":
+            exec_result = cmd_svc.execute_update_goal(
+                payload["goal_name"], payload["amount"]
+            )
+        elif tool == "propose_undo_last_adjustment":
+            exec_result = cmd_svc.execute_undo_last_adjustment(
+                payload.get("account_name")
             )
         elif tool == "propose_update_item":
             exec_result = cmd_svc.execute_update_item(
@@ -384,7 +625,7 @@ class FinanceAgent:
     def process_voice_command(self, text: str) -> Dict[str, Any]:
         clean = _strip_accents(text.strip()).lower()
 
-        # Immediate voice confirmation words
+        # 0. Immediate voice confirmation / cancellation words
         if clean in ("confirmar", "si confirmar", "confirmo", "dale", "si", "aprobar"):
             for act_id, act in reversed(list(pending_voice_actions_store.items())):
                 if act.get("user_id") == self.user_id and act.get("status") == "pending":
@@ -397,32 +638,184 @@ class FinanceAgent:
                     res = self.cancel_action(act_id)
                     return {"type": "cancelled", "reply": "Acción descartada", "needs_refresh": False}
 
-        # Case 4: Intent: Toggle Paid Expense (*0) or disambiguate invoices
-        # e.g.: "marcar pagado gas", "pague movistar", "marcar pagado energia 20", "marcar pagado factura", "pague servicios"
+        # 1. Undo Last Adjustment Intent
+        # e.g. "borrar el ultimo movimiento de daviplata", "deshacer ultimo ajuste de caja social"
+        is_undo_intent = any(
+            kw in clean
+            for kw in ("deshacer", "borrar ultimo", "borrar el ultimo", "eliminar ultimo", "eliminar el ultimo", "revertir ultimo")
+        )
+        if is_undo_intent:
+            target_acc = _identify_liquid_account(clean)
+            staged = self.propose_undo_last_adjustment(target_acc)
+            return {
+                "type": "stage_action",
+                "staged_action": staged,
+                "reply": f"Propuesta: {staged['preview_summary']}. ¿Confirmas el cambio?"
+            }
+
+        # 2. Smart Read Queries: Pending Receivables, Pending Bills, Goals Progress
+        is_pending_recs_query = any(
+            kw in clean
+            for kw in ("quien falta por pagar", "arriendos pendientes", "cuentas por cobrar", "quien me debe", "falta por cobrar", "pendientes por cobrar")
+        ) or ("arriendo" in clean and any(q in clean for q in ("quien", "cual", "pendiente", "falta")))
+        if is_pending_recs_query:
+            summary = self.query_service.get_dashboard_summary()
+            pending_recs = [r for r in summary["receivables"] if r["calculated_pending"] > 0]
+            if not pending_recs:
+                return {"type": "read", "reply": "Todas las cuentas por cobrar y arriendos del mes ya fueron recaudados."}
+            items_str = ", ".join(f"{r['name']} (${r['calculated_pending']:,.0f})" for r in pending_recs)
+            return {
+                "type": "read",
+                "reply": f"Tienes {len(pending_recs)} cobros pendientes por un total de ${summary['kpis']['pend']:,.0f} COP: {items_str}.",
+                "data": pending_recs
+            }
+
+        is_pending_bills_query = any(
+            kw in clean
+            for kw in ("que facturas", "cuales facturas", "cuales recibos", "facturas pendientes", "recibos pendientes", "falta por pagar")
+        )
+        if is_pending_bills_query:
+            summary = self.query_service.get_dashboard_summary()
+            pending_exps = [e for e in summary["recurring_expenses"] if not e["is_paid"]]
+            if not pending_exps:
+                return {"type": "read", "reply": "¡Excelente! No tienes ninguna factura pendiente por pagar este mes."}
+            items_str = ", ".join(f"{e['name']} (${e['calculated_pending']:,.0f})" for e in pending_exps)
+            return {
+                "type": "read",
+                "reply": f"Tienes {len(pending_exps)} facturas pendientes por un total de ${summary['kpis']['gastos_mes']:,.0f} COP: {items_str}.",
+                "data": pending_exps
+            }
+
+        matched_goal = _identify_goal(clean)
+        is_goal_query = any(
+            kw in clean
+            for kw in ("como van mis metas", "mis metas", "cuanto me falta para", "cuanto falta para", "estado de la meta", "progreso de")
+        )
+        if is_goal_query:
+            goals = self.query_service.repo.get_financial_goals()
+            if matched_goal:
+                g = next((item for item in goals if item["name"].lower() == matched_goal.lower()), None)
+                if g:
+                    rem = max(0.0, float(g["target_amount"]) - float(g["allocated_amount"]))
+                    pct = round((float(g["allocated_amount"]) / float(g["target_amount"])) * 100, 1)
+                    return {
+                        "type": "read",
+                        "reply": f"En la meta {g['name']} llevas ${g['allocated_amount']:,.0f} de ${g['target_amount']:,.0f} COP ({pct}%). Te faltan ${rem:,.0f} COP.",
+                        "data": g
+                    }
+            summary_str = ", ".join(
+                f"{g['name']}: ${g['allocated_amount']:,.0f}/${g['target_amount']:,.0f}"
+                for g in goals
+            )
+            return {
+                "type": "read",
+                "reply": f"Estado actual de tus {len(goals)} metas financieras: {summary_str}.",
+                "data": goals
+            }
+
+        # 3. Allocate to Financial Goal Intent
+        # e.g. "abonar 300 000 a la meta de maestria", "asignar 150000 a visa"
+        if matched_goal:
+            goal_amount = _extract_amount(text, mask_entity=matched_goal)
+            has_goal_verb = any(v in clean for v in ("abonar", "abono", "asignar", "meter", "aportar", "agregar", "destinar", "ahorrar", "meta"))
+            if goal_amount is not None and has_goal_verb:
+                staged = self.propose_allocate_goal(matched_goal, goal_amount)
+                return {
+                    "type": "stage_action",
+                    "staged_action": staged,
+                    "reply": f"Propuesta: {staged['preview_summary']}. ¿Confirmas el cambio?"
+                }
+
+        # 4. Transfer Between Liquid Accounts Intent
+        # e.g. "transferi 100 000 de caja social a nequi", "pase 50 000 de daviplata a mi bolsillo", "saque 200 000 de caja social para mi bolsillo"
+        transfer_pair = _identify_transfer_accounts(text)
+        has_transfer_verb = any(
+            v in clean
+            for v in ("transferi", "transferir", "transferencia", "pase", "pasar", "movi", "mover", "saque", "retire", "enviar", "envie")
+        )
+        if transfer_pair and has_transfer_verb:
+            from_acc, to_acc = transfer_pair
+            amount = _extract_amount(text)
+            if amount is not None:
+                staged = self.propose_transfer_between_accounts(from_acc, to_acc, amount)
+                return {
+                    "type": "stage_action",
+                    "staged_action": staged,
+                    "reply": f"Propuesta: {staged['preview_summary']}. ¿Confirmas el cambio?"
+                }
+
+        # 5. Collect Receivable / Rent Intent
+        # e.g. "ana ya pago el arriendo en caja social", "marcar cobrado camila", "recibi el pago de marisol en nequi", "me pagaron un arriendo"
+        matched_rec = _identify_receivable(clean)
+        is_collect_intent = any(
+            kw in clean
+            for kw in ("arriendo", "marcar cobrado", "cobrado", "cobre", "ya pago", "me pago", "recibi el pago", "pago de")
+        )
+        if is_collect_intent:
+            dest_acc = _identify_liquid_account(clean)
+            if matched_rec:
+                staged = self.propose_collect_receivable(matched_rec, is_collected=True, dest_account=dest_acc)
+                return {
+                    "type": "stage_action",
+                    "staged_action": staged,
+                    "reply": f"Propuesta: {staged['preview_summary']}. ¿Confirmas el cambio?"
+                }
+            else:
+                # Ambiguous receivable collection -> return pending receivables as candidates
+                summary = self.query_service.get_dashboard_summary()
+                rec_candidates = []
+                for r in summary["receivables"]:
+                    if r["calculated_pending"] > 0:
+                        preview = self.command_service.preview_mutation("collect_receivable", {
+                            "item_name": r["name"],
+                            "is_collected": True,
+                            "dest_account": dest_acc
+                        })
+                        rec_candidates.append({
+                            "item_name": r["name"],
+                            "amount": float(r["calculated_pending"]),
+                            "preview_summary": f"Marcar {r['name']} como cobrado",
+                            "delta_incl_pend": preview["impact_delta"]["delta_incl_pend"],
+                            "delta_restante": preview["impact_delta"]["delta_restante"],
+                            "target_item": preview.get("target_item")
+                        })
+                if rec_candidates:
+                    staged = self.propose_collect_receivable(
+                        rec_candidates[0]["item_name"],
+                        is_collected=True,
+                        dest_account=dest_acc,
+                        candidates=rec_candidates
+                    )
+                    return {
+                        "type": "stage_action",
+                        "staged_action": staged,
+                        "reply": "¿Cuál cuenta por cobrar o arriendo recibiste? Selecciona una opción:"
+                    }
+
+        # 6. Mark Expense Pending (*1) or Paid (*0) / Pay Expense From Account
+        expenses = self.query_service.repo.get_recurring_expenses()
+        matched_expense_name = _identify_expense(clean, expenses)
+
+        is_revert_pending_intent = any(kw in clean for kw in ("marcar pendiente", "como pendiente", "reactivar factura", "reactivar recibo"))
+        if is_revert_pending_intent and matched_expense_name:
+            staged = self.propose_toggle_pending_status(matched_expense_name, is_paid=False)
+            return {
+                "type": "stage_action",
+                "staged_action": staged,
+                "reply": f"Propuesta: {staged['preview_summary']}. ¿Confirmas el cambio?"
+            }
+
         is_paid_intent = any(kw in clean for kw in ("marcar pagado", "pagado", "pague", "pago", "cancela factura"))
         if is_paid_intent:
-            expenses = self.query_service.repo.get_recurring_expenses()
-            
-            # Check exact or alias match
-            matched_expense_name = None
-            for alias, official_name in EXPENSE_ALIASES.items():
-                if re.search(rf"\b{alias}\b", clean):
-                    matched_expense_name = official_name
-                    break
+            source_liq_acc = _identify_liquid_account(clean)
 
-            if not matched_expense_name:
-                # Check directly in expense names
-                for exp in expenses:
-                    exp_clean = _strip_accents(exp["name"]).lower()
-                    # Strip numeric suffix
-                    base_name = re.sub(r"\s+\d+(?:-\d+)?$", "", exp_clean)
-                    if base_name in clean:
-                        matched_expense_name = exp["name"]
-                        break
-
-            # If unambiguous match found:
             if matched_expense_name:
-                staged = self.propose_toggle_pending_status(matched_expense_name, is_paid=True)
+                # If both an expense AND a liquid account are mentioned (e.g. "Pagué Energía con Daviplata"),
+                # execute compound payment (mark *0 + deduct from liquid account)
+                if source_liq_acc:
+                    staged = self.propose_pay_expense_from_account(matched_expense_name, source_liq_acc)
+                else:
+                    staged = self.propose_toggle_pending_status(matched_expense_name, is_paid=True)
                 return {
                     "type": "stage_action",
                     "staged_action": staged,
@@ -430,7 +823,6 @@ class FinanceAgent:
                 }
 
             # Ambiguous match or generic invoice intent ("pagué factura", "marcar pagado servicio")
-            # Build candidates list of currently pending expenses
             pending_candidates = []
             for exp in expenses:
                 if exp.get("is_pending", True):
@@ -461,7 +853,7 @@ class FinanceAgent:
                     "reply": "¿Cuál factura deseas marcar como pagada? Selecciona una de las opciones pendientes:"
                 }
 
-        # Case 3: Intent: Direct account balance modification
+        # 7. Direct Account Balance Modification
         # e.g. "modificar el saldo de bolsillo a 300000", "fijar daviplata en 150 000", "cambiar nequi a 200000"
         has_set_verb = any(v in clean for v in ("modificar", "cambiar", "fijar", "poner", "dejar", "actualizar", "establecer", "ajustar"))
         has_movement_verb = any(v in clean for v in ("gaste", "gasto", "compre", "pague", "retire", "saque", "abono", "ingreso", "recibi", "agregar"))
@@ -477,7 +869,7 @@ class FinanceAgent:
                     "reply": f"Propuesta: {staged['preview_summary']}. ¿Confirmas el cambio?"
                 }
 
-        # Case 1 & 2: Intent: Add Ledger Adjustment / Natural Expense
+        # 8. Add Ledger Adjustment / Natural Expense or Income
         # e.g. "Gasté 50000 en transporte desde mi bolsillo", "Agregar gasto en Daviplata de 50 000 por mercado", "abono a camila 20 de 100000"
         identified_acc = identified_acc or "Daviplata"
         amount = _extract_amount(text, mask_entity=identified_acc)
@@ -492,16 +884,16 @@ class FinanceAgent:
             else:
                 amount_delta = abs(amount)
 
+            parent_type = "receivable" if identified_acc in RECEIVABLES_MAP.values() else "liquid_account"
             reason = _extract_reason(text, account_name=identified_acc)
-            staged = self.propose_ledger_adjustment(identified_acc, amount_delta, reason)
+            staged = self.propose_ledger_adjustment(identified_acc, amount_delta, reason, parent_type=parent_type)
             return {
                 "type": "stage_action",
                 "staged_action": staged,
                 "reply": f"Propuesta: {staged['preview_summary']}. ¿Confirmas el cambio?"
             }
 
-        # Intent: Read Investment Capacity
-        # e.g.: "¿cuánto puedo invertir este mes?", "capacidad de inversión", "cuánto me queda para invertir"
+        # 9. Read Investment Capacity
         if any(w in clean for w in ("invertir", "capacidad", "excedente", "incl pend")):
             cap = self.get_investment_capacity("month")
             val = cap["capacidad_invertible"]
@@ -511,8 +903,7 @@ class FinanceAgent:
                 "data": cap
             }
 
-        # Intent: Read Account details / balance
-        # e.g.: "¿cuánto tengo en daviplata?", "saldo caja social"
+        # 10. Read Account details / balance
         if any(w in clean for w in ("cuanto", "saldo", "estado")):
             summary = self.query_service.get_dashboard_summary()
             for acc in summary["liquid_accounts"]:

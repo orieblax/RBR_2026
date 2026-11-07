@@ -143,6 +143,46 @@ export function ConfirmationModal({
                     )}
                   </div>
                 </div>
+
+                {/* Secondary Item (Dual Operation: Transfer Destination or Payment/Collection Account) */}
+                {displayTarget.secondary_item && (
+                  <div className="mt-3 pt-3 border-top border-secondary-subtle">
+                    <div className="d-flex justify-content-between align-items-center mb-1">
+                      <span className="badge bg-info-subtle text-info-emphasis fw-semibold px-2 py-1">
+                        {displayTarget.secondary_item.category_label || 'Cuenta Relacionada'}
+                      </span>
+                      {displayTarget.secondary_item.note && (
+                        <span className="badge bg-secondary-subtle text-secondary fw-normal">
+                          {displayTarget.secondary_item.note}
+                        </span>
+                      )}
+                    </div>
+                    <div className="d-flex justify-content-between align-items-baseline">
+                      <div>
+                        <h6 className="fw-bold mb-0 text-dark">{displayTarget.secondary_item.name}</h6>
+                        <small className="text-muted">
+                          Saldo anterior: {formatCOP(displayTarget.secondary_item.before_value)}
+                        </small>
+                      </div>
+                      <div className="text-end">
+                        <div className="fs-6 fw-bold text-primary">
+                          {formatCOP(displayTarget.secondary_item.after_value)}
+                        </div>
+                        {displayTarget.secondary_item.delta !== undefined && (
+                          <small
+                            className={`fw-semibold ${
+                              displayTarget.secondary_item.delta >= 0 ? 'text-success' : 'text-danger'
+                            }`}
+                          >
+                            {displayTarget.secondary_item.delta >= 0
+                              ? `+${formatCOP(displayTarget.secondary_item.delta)}`
+                              : `-${formatCOP(Math.abs(displayTarget.secondary_item.delta))}`}
+                          </small>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
