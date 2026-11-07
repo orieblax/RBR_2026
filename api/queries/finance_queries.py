@@ -115,13 +115,17 @@ class FinanceQueryService:
         }
 
     def search_financial_history(self, query: str) -> List[Dict[str, Any]]:
-        clean = query.strip().lower()
+        from api.agent.prompt_enhancer import PromptEnhancer
+        from api.agent.reranker import ReRanker
+
+        enhanced = PromptEnhancer.enhance(query)
+        clean = enhanced["canonical_text"]
         results = []
         summary = self.get_dashboard_summary()
         
         # Search in liquid accounts & adjustments
         for acc in summary["liquid_accounts"]:
-            if clean in acc["name"].lower():
+            if clean in acc["name"].lower() or query.strip().lower() in acc["name"].lower():
                 results.append({"type": "cuenta_liquidez", "name": acc["name"], "match": acc["name"], "data": acc})
             for adj in acc.get("adjustments", []):
                 if clean in adj.get("note", "").lower() or clean in str(adj.get("amount", "")):
@@ -151,4 +155,4 @@ class FinanceQueryService:
             if clean in exp["name"].lower():
                 results.append({"type": "gasto", "name": exp["name"], "data": exp})
 
-        return results
+        return ReRanker.rerank_history_results(clean, results)

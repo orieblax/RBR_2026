@@ -95,7 +95,7 @@ SUPABASE_JWT_SECRET=your-supabase-jwt-secret
 # Security & Encryption Vault
 # Generate a new Fernet key with:
 # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-MASTER_ENCRYPTION_KEY=Wk93Qkx4Y01XbmFqM19vRkV3c05mRE90TmlhSWl5d0hWZEtNYVhzQ0xYWT0=
+MASTER_ENCRYPTION_KEY=master-key
 
 # Application Environment
 ENV=development

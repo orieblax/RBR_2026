@@ -340,4 +340,67 @@ def test_use_case_9_undo_last_adjustment_and_pending_queries():
     davi = next(a for a in summary["liquid_accounts"] if a["name"] == "Daviplata")
     assert davi["calculated_total"] == 2893.0 + 3600.0
 
+def test_use_case_10_prompt_enhancer_and_reranker_variants():
+    from api.agent.prompt_enhancer import PromptEnhancer
+    from api.agent.reranker import ReRanker
+
+    user_id = "test-case-10-user"
+    agent = FinanceAgent(user_id)
+
+    # Variant 1: Colloquial slang ("Se me fueron 50 lucas") + synonym ("billetera") -> Bolsillo -50,000 Taxi
+    res1 = agent.process_voice_command("Se me fueron 50 lucas en taxi desde la billetera")
+    assert res1["type"] == "stage_action"
+    assert res1["prompt_enhancement"]["was_enhanced"] is True
+    staged1 = res1["staged_action"]
+    assert staged1["tool_name"] == "propose_ledger_adjustment"
+    assert staged1["target_item"]["name"] == "Bolsillo"
+    assert staged1["target_item"]["delta"] == -50000.0
+    assert staged1["target_item"]["note"] == "Taxi"
+    assert staged1["rerank_score"] > 0
+
+    # Variant 2: ASR phonetic transcription ("David plata") + balance setter
+    res2 = agent.process_voice_command("David plata quedó en 150 mil")
+    assert res2["type"] == "stage_action"
+    staged2 = res2["staged_action"]
+    assert staged2["tool_name"] == "propose_set_account_balance"
+    assert staged2["target_item"]["name"] == "Daviplata"
+    assert staged2["target_item"]["after_value"] == 150000.0
+
+    # Variant 3: Colloquial bill payment ("Ya cancelé el recibo de la luz con neki") -> Energía 20 + Nequi
+    res3 = agent.process_voice_command("Ya cancelé el recibo de la luz con neki")
+    assert res3["type"] == "stage_action"
+    staged3 = res3["staged_action"]
+    assert staged3["tool_name"] == "propose_pay_expense_from_account"
+    assert staged3["target_item"]["name"] == "Energía 20"
+    assert staged3["target_item"]["secondary_item"]["name"] == "Nequi"
+
+    # Variant 4: Colloquial rent collection ("Ana me consignó lo del arriendo en el banco caja social")
+    res4 = agent.process_voice_command("Ana me consignó lo del arriendo en el banco caja social")
+    assert res4["type"] == "stage_action"
+    staged4 = res4["staged_action"]
+    assert staged4["tool_name"] == "propose_collect_receivable"
+    assert staged4["target_item"]["name"] == "Ana 26"
+    assert staged4["target_item"]["secondary_item"]["name"] == "Caja social"
+
+    # Variant 5: Colloquial goal allocation ("Le metí 300 lucas a la maestría")
+    res5 = agent.process_voice_command("Le metí 300 lucas a la maestría")
+    assert res5["type"] == "stage_action"
+    staged5 = res5["staged_action"]
+    assert staged5["tool_name"] == "propose_allocate_goal"
+    assert staged5["target_item"]["name"] == "Maestría"
+    assert staged5["target_item"]["delta"] == 300000.0
+
+    # Variant 6: Re-Ranker direct intent ranking verification
+    enh = PromptEnhancer.enhance("Pasé 100 barras de davi plata a neki")
+    ranked = ReRanker.rerank_intent_candidates(
+        enh["canonical_text"],
+        [
+            {"tool_name": "propose_ledger_adjustment", "has_amount": True, "entity_confidence": 0.9},
+            {"tool_name": "propose_transfer_between_accounts", "has_amount": True, "entity_confidence": 0.95},
+        ],
+    )
+    assert ranked[0]["tool_name"] == "propose_transfer_between_accounts"
+    assert ranked[0]["rerank_score"] > ranked[1]["rerank_score"]
+
+
 
